@@ -1,0 +1,6 @@
+/out/
+/resources/shaders
+/CMakePresets.json
+
+.vs/
+.vscode/
