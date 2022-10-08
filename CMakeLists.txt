@@ -1,4 +1,4 @@
-﻿cmake_minimum_required (VERSION 3.11)
+﻿cmake_minimum_required (VERSION 3.20)
 project("game")
 
 set(CMAKE_C_STANDARD 99)
@@ -120,10 +120,11 @@ endif()
 
 file(GLOB_RECURSE GLSL_SOURCE_FILES "${CMAKE_SOURCE_DIR}/shaders/*.glsl")
 foreach(GLSL ${GLSL_SOURCE_FILES})
-    get_filename_component(FILE_NAME ${GLSL} NAME_WLE)
-    set(SPIRV "${CMAKE_SOURCE_DIR}/resources/shaders/${FILE_NAME}.spv")
+    cmake_path(RELATIVE_PATH GLSL BASE_DIRECTORY "${CMAKE_SOURCE_DIR}/shaders" OUTPUT_VARIABLE GLSL_REL_PATH)
+    cmake_path(REMOVE_EXTENSION GLSL_REL_PATH LAST_ONLY)
+    set(SPIRV "${CMAKE_SOURCE_DIR}/resources/shaders/${GLSL_REL_PATH}.spv")
     add_custom_command(OUTPUT ${SPIRV}
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/resources/shaders"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/resources/shaders/"
         COMMAND ${GLSL_VALIDATOR} -o ${SPIRV} -V ${GLSL} --quiet
         DEPENDS ${GLSL})
     list(APPEND SPIRV_BINARY_FILES ${SPIRV})
@@ -135,6 +136,20 @@ add_executable(mipmapper
     "src/mipmapper.cpp")
 target_link_libraries(mipmapper spdlog spng Vulkan::Vulkan)
 
+file(GLOB_RECURSE PNG_IMAGES "${CMAKE_SOURCE_DIR}/resources/*.png")
+foreach(IMAGE ${PNG_IMAGES})
+    if (${IMAGE} MATCHES ".*\\.mipdata\\.png$")
+        continue()
+    endif()
+    cmake_path(REPLACE_EXTENSION IMAGE LAST_ONLY "mipdata.png" OUTPUT_VARIABLE MIP_IMAGE)
+    add_custom_command(OUTPUT ${MIP_IMAGE}
+        COMMAND $<TARGET_FILE:mipmapper> ${IMAGE} ${MIP_IMAGE}
+        DEPENDS ${IMAGE})
+    list(APPEND MIP_IMAGES ${MIP_IMAGE})
+endforeach()
+add_custom_target(mip_images DEPENDS ${MIP_IMAGES})
+
+
 # ---- Application ----
 add_executable(game
     "src/main.cpp"
@@ -144,7 +159,7 @@ add_executable(game
     "src/vkw/CommandBuffer.cpp"
     "src/fs.cpp"
     "src/vkw/Vkresource.cpp")
-add_dependencies(game shaders)
+add_dependencies(game mip_images shaders)
 target_link_libraries(game
     glfw
     glm

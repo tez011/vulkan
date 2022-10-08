@@ -1,4 +1,5 @@
 #define VK_ENABLE_BETA_EXTENSIONS
+#define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <set>
 #include <spdlog/spdlog.h>

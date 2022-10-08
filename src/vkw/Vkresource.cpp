@@ -187,24 +187,20 @@ ImageView<N>::operator VkImageView() const
 template class ImageView<1>;
 template class ImageView<2>;
 
-HostBuffer::HostBuffer(Allocator& allocator, fs::istream& input)
-    : m_allocator(allocator)
-    , m_extent({ static_cast<uint32_t>(input.length()), 0, 0 })
+HostBuffer::HostBuffer(Allocator& allocator, fs::istream&& input)
+    : HostBuffer(allocator, std::move(input), { static_cast<uint32_t>(input.length()), 0, 0 })
 {
-    size_t len = input.length();
-    std::vector<char> slurp_buffer(len);
-    input.read(slurp_buffer.data(), len);
-    initialize(slurp_buffer.data(), len);
 }
 
-HostBuffer::HostBuffer(Allocator& allocator, fs::istream& input, VkExtent3D extent)
+HostBuffer::HostBuffer(Allocator& allocator, fs::istream&& input, VkExtent3D extent)
     : m_allocator(allocator)
     , m_extent(extent)
+    , m_buffer(create_buffer(allocator.device(), input.length()))
 {
-    size_t len = input.length();
-    std::vector<char> slurp_buffer(len);
-    input.read(slurp_buffer.data(), len);
-    initialize(slurp_buffer.data(), len);
+    std::vector<char> slurp_buffer(input.length());
+    input.read(slurp_buffer.data(), slurp_buffer.size());
+    allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
+    allocator.write_mapped(m_buffer_allocation, slurp_buffer.data(), slurp_buffer.size());
 }
 
 HostBuffer::~HostBuffer()
@@ -213,73 +209,116 @@ HostBuffer::~HostBuffer()
     vkDestroyBuffer(m_allocator.device(), m_buffer, nullptr);
 }
 
-void HostBuffer::initialize(const void* data, size_t len)
+VkBuffer HostBuffer::create_buffer(VkDevice device, size_t len)
 {
-    VkDevice device = m_allocator.device();
     VkResult res;
+    VkBuffer out_buffer;
     VkBufferCreateInfo createinfo {};
     createinfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     createinfo.size = len;
     createinfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     createinfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if ((res = vkCreateBuffer(device, &createinfo, nullptr, &m_buffer)) != VK_SUCCESS) {
-        spdlog::critical("vkCreateBuffer: {}", res);
-        abort();
-    }
+    if ((res = vkCreateBuffer(device, &createinfo, nullptr, &out_buffer)) == VK_SUCCESS)
+        return out_buffer;
 
-    m_allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
-    m_allocator.write_mapped(m_buffer_allocation, data, len);
+    spdlog::critical("vkCreateBuffer: {}", res);
+    abort();
+}
+
+HostImage::~HostImage()
+{
+    if (m_mip_allocation)
+        m_allocator.free(m_mip_allocation);
+    if (m_mip_buffer != VK_NULL_HANDLE)
+        vkDestroyBuffer(m_allocator.device(), m_mip_buffer, nullptr);
 }
 
 template <unsigned int N>
-void HostBuffer::copy_to_image(Image<N>& out, CommandBuffer& command)
+void HostImage::copy_to_image(Image<N>& out, CommandBuffer& command)
 {
-    std::array<VkImageMemoryBarrier, 2 * N> barrier {};
-    for (int i = 0; i < 2 * N; i++) {
+    std::array<VkImageMemoryBarrier, N> barrier {};
+    for (int i = 0; i < N; i++) {
         barrier[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier[i].oldLayout = i < N ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier[i].newLayout = i < N ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier[i].image = out[i % N];
+        barrier[i].image = out[i];
         barrier[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier[i].subresourceRange.baseMipLevel = 0;
-        barrier[i].subresourceRange.levelCount = 1;
+        barrier[i].subresourceRange.levelCount = m_mip_levels;
         barrier[i].subresourceRange.baseArrayLayer = 0;
         barrier[i].subresourceRange.layerCount = 1;
-        barrier[i].srcAccessMask = i < N ? 0 : VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier[i].dstAccessMask = i < N ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_READ_BIT;
+        barrier[i].srcAccessMask = 0;
+        barrier[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     }
-    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, N, barrier.data());
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+        0, nullptr, 0, nullptr, N, barrier.data());
 
-    VkBufferImageCopy region {};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset.x = 0;
-    region.imageOffset.y = 0;
-    region.imageOffset.z = 0;
-    region.imageExtent = m_extent;
-    for (int i = 0; i < N; i++)
-        vkCmdCopyBufferToImage(command, m_buffer, out[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    std::vector<VkBufferImageCopy> copies(m_mip_levels);
+    int32_t mip_position = 0;
+    for (int i = 0; i < m_mip_levels; i++) {
+        copies[i].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copies[i].imageSubresource.mipLevel = i;
+        copies[i].imageSubresource.baseArrayLayer = 0;
+        copies[i].imageSubresource.layerCount = 1;
+        copies[i].imageOffset = { 0, 0, 0 };
+        copies[i].imageExtent.width = m_extent.width >> i;
+        copies[i].imageExtent.height = m_extent.height >> i;
+        copies[i].imageExtent.depth = 1;
+        if (i == 0) {
+            // base image, tightly packed
+            copies[i].bufferOffset = copies[i].bufferRowLength = copies[i].bufferImageHeight = 0;
+        } else {
+            // mip image
+            copies[i].bufferOffset = FormatWidth(m_format) * (mip_position * m_extent.width / 2);
+            copies[i].bufferRowLength = m_extent.width / 2;
+            copies[i].bufferImageHeight = m_extent.height;
+            mip_position += copies[i].imageExtent.height;
+        }
+    }
+    for (int i = 0; i < N; i++) {
+        vkCmdCopyBufferToImage(command, m_buffer, out[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, copies.data());
+        vkCmdCopyBufferToImage(command, m_mip_buffer, out[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, m_mip_levels - 1, copies.data() + 1);
+    }
 
-    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, N, barrier.data() + N);
+    for (int i = 0; i < N; i++) {
+        barrier[i].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    }
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, nullptr, 0, nullptr, N, barrier.data());
 }
 
-template void HostBuffer::copy_to_image(Image<1>&, CommandBuffer&);
-template void HostBuffer::copy_to_image(Image<2>&, CommandBuffer&);
+template void HostImage::copy_to_image(Image<1>&, CommandBuffer&);
+template void HostImage::copy_to_image(Image<2>&, CommandBuffer&);
 
 PNGImage::PNGImage(Allocator& allocator, fs::istream&& input)
-    : HostBuffer(allocator)
+    : HostImage(allocator, VK_FORMAT_R8G8B8A8_SRGB)
 {
     std::unique_ptr<char[]> decoded;
     size_t decoded_len = 0;
     decode_png(input, decoded, decoded_len, m_extent);
-    initialize(decoded.get(), decoded_len);
+
+    m_buffer = create_buffer(allocator.device(), decoded_len);
+    allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
+    allocator.write_mapped(m_buffer_allocation, decoded.get(), decoded_len);
+}
+
+PNGImage::PNGImage(Allocator& allocator, fs::istream&& input, fs::istream&& mip_input)
+    : PNGImage(allocator, std::move(input))
+{
+    std::unique_ptr<char[]> decoded;
+    size_t decoded_len = 0;
+    VkExtent3D mip_extent; // unused
+    decode_png(mip_input, decoded, decoded_len, mip_extent);
+
+    m_mip_levels = static_cast<uint32_t>(std::floor(std::log2(std::max(m_extent.width, m_extent.height)))) + 1;
+    m_mip_buffer = create_buffer(allocator.device(), decoded_len);
+    allocator.allocate(m_mip_buffer, MemoryUsage::HostLocal, m_mip_allocation);
+    allocator.write_mapped(m_mip_allocation, decoded.get(), decoded_len);
 }
 
 static int png_read(spng_ctx* ctx, void* user, void* dst, size_t length)
@@ -324,6 +363,172 @@ void PNGImage::decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data,
         abort();
     }
     spng_ctx_free(ctx);
+}
+
+size_t FormatWidth(VkFormat fmt)
+{
+    switch (fmt) {
+    case VK_FORMAT_UNDEFINED:
+        return 0;
+    case VK_FORMAT_R4G4_UNORM_PACK8:
+        return 1;
+    case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+    case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+    case VK_FORMAT_R5G6B5_UNORM_PACK16:
+    case VK_FORMAT_B5G6R5_UNORM_PACK16:
+    case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+    case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
+    case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+        return 2;
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8_USCALED:
+    case VK_FORMAT_R8_SSCALED:
+    case VK_FORMAT_R8_UINT:
+    case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R8_SRGB:
+        return 1;
+    case VK_FORMAT_R8G8_UNORM:
+    case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R8G8_USCALED:
+    case VK_FORMAT_R8G8_SSCALED:
+    case VK_FORMAT_R8G8_UINT:
+    case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R8G8_SRGB:
+        return 2;
+    case VK_FORMAT_R8G8B8_UNORM:
+    case VK_FORMAT_R8G8B8_SNORM:
+    case VK_FORMAT_R8G8B8_USCALED:
+    case VK_FORMAT_R8G8B8_SSCALED:
+    case VK_FORMAT_R8G8B8_UINT:
+    case VK_FORMAT_R8G8B8_SINT:
+    case VK_FORMAT_R8G8B8_SRGB:
+    case VK_FORMAT_B8G8R8_UNORM:
+    case VK_FORMAT_B8G8R8_SNORM:
+    case VK_FORMAT_B8G8R8_USCALED:
+    case VK_FORMAT_B8G8R8_SSCALED:
+    case VK_FORMAT_B8G8R8_UINT:
+    case VK_FORMAT_B8G8R8_SINT:
+    case VK_FORMAT_B8G8R8_SRGB:
+        return 3;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_R8G8B8A8_USCALED:
+    case VK_FORMAT_R8G8B8A8_SSCALED:
+    case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SNORM:
+    case VK_FORMAT_B8G8R8A8_USCALED:
+    case VK_FORMAT_B8G8R8A8_SSCALED:
+    case VK_FORMAT_B8G8R8A8_UINT:
+    case VK_FORMAT_B8G8R8A8_SINT:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+    case VK_FORMAT_A8B8G8R8_SNORM_PACK32:
+    case VK_FORMAT_A8B8G8R8_USCALED_PACK32:
+    case VK_FORMAT_A8B8G8R8_SSCALED_PACK32:
+    case VK_FORMAT_A8B8G8R8_UINT_PACK32:
+    case VK_FORMAT_A8B8G8R8_SINT_PACK32:
+    case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+    case VK_FORMAT_A2R10G10B10_SNORM_PACK32:
+    case VK_FORMAT_A2R10G10B10_USCALED_PACK32:
+    case VK_FORMAT_A2R10G10B10_SSCALED_PACK32:
+    case VK_FORMAT_A2R10G10B10_UINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_A2B10G10R10_SNORM_PACK32:
+    case VK_FORMAT_A2B10G10R10_USCALED_PACK32:
+    case VK_FORMAT_A2B10G10R10_SSCALED_PACK32:
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+        return 4;
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_USCALED:
+    case VK_FORMAT_R16_SSCALED:
+    case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16_SFLOAT:
+        return 2;
+    case VK_FORMAT_R16G16_UNORM:
+    case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_USCALED:
+    case VK_FORMAT_R16G16_SSCALED:
+    case VK_FORMAT_R16G16_UINT:
+    case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R16G16_SFLOAT:
+        return 4;
+    case VK_FORMAT_R16G16B16_UNORM:
+    case VK_FORMAT_R16G16B16_SNORM:
+    case VK_FORMAT_R16G16B16_USCALED:
+    case VK_FORMAT_R16G16B16_SSCALED:
+    case VK_FORMAT_R16G16B16_UINT:
+    case VK_FORMAT_R16G16B16_SINT:
+    case VK_FORMAT_R16G16B16_SFLOAT:
+        return 6;
+    case VK_FORMAT_R16G16B16A16_UNORM:
+    case VK_FORMAT_R16G16B16A16_SNORM:
+    case VK_FORMAT_R16G16B16A16_USCALED:
+    case VK_FORMAT_R16G16B16A16_SSCALED:
+    case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R16G16B16A16_SFLOAT:
+        return 8;
+    case VK_FORMAT_R32_UINT:
+    case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32_SFLOAT:
+        return 4;
+    case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R32G32_SFLOAT:
+        return 8;
+    case VK_FORMAT_R32G32B32_UINT:
+    case VK_FORMAT_R32G32B32_SINT:
+    case VK_FORMAT_R32G32B32_SFLOAT:
+        return 12;
+    case VK_FORMAT_R32G32B32A32_UINT:
+    case VK_FORMAT_R32G32B32A32_SINT:
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+        return 16;
+    case VK_FORMAT_R64_UINT:
+    case VK_FORMAT_R64_SINT:
+    case VK_FORMAT_R64_SFLOAT:
+        return 8;
+    case VK_FORMAT_R64G64_UINT:
+    case VK_FORMAT_R64G64_SINT:
+    case VK_FORMAT_R64G64_SFLOAT:
+        return 16;
+    case VK_FORMAT_R64G64B64_UINT:
+    case VK_FORMAT_R64G64B64_SINT:
+    case VK_FORMAT_R64G64B64_SFLOAT:
+        return 24;
+    case VK_FORMAT_R64G64B64A64_UINT:
+    case VK_FORMAT_R64G64B64A64_SINT:
+    case VK_FORMAT_R64G64B64A64_SFLOAT:
+        return 32;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+    case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+        return 4;
+    case VK_FORMAT_D16_UNORM:
+        return 2;
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D32_SFLOAT:
+        return 4;
+    case VK_FORMAT_S8_UINT:
+        return 1;
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+        return 3;
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+        return 4;
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return 5;
+    default:
+        spdlog::critical("vkw::FormatWidth({}): unknown", fmt);
+        abort();
+    }
 }
 
 }

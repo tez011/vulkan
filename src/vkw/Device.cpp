@@ -33,10 +33,6 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(
         which_level = spdlog::level::debug;
 
     spdlog::log(which_level, "[vulkan] {}", cb_data->pMessage);
-#if defined(WIN32) && !defined(NDEBUG)
-    if (which_level == spdlog::level::err)
-        _sleep(600);
-#endif
     return VK_FALSE;
 }
 

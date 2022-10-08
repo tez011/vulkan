@@ -1,5 +1,3 @@
-cmake_minimum_required (VERSION 3.11)
-
 add_library(spng STATIC
     ${spng_SOURCE_DIR}/spng/spng.c
     ${miniz_SOURCE_DIR}/miniz.c)

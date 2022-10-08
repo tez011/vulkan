@@ -3,6 +3,8 @@
 
 namespace vkw {
 
+size_t FormatWidth(VkFormat fmt);
+
 template <unsigned int N>
 class Buffer {
     static_assert(N == 1 || N == 2);
@@ -91,17 +93,18 @@ protected:
     VkBuffer m_buffer;
     SingleAllocation m_buffer_allocation;
 
+    static VkBuffer create_buffer(VkDevice device, size_t length);
+
     HostBuffer(Allocator& allocator)
         : m_allocator(allocator)
         , m_extent({ 0, 0, 0 })
         , m_buffer(VK_NULL_HANDLE)
     {
     }
-    void initialize(const void* data, size_t length);
 
 public:
-    HostBuffer(Allocator& allocator, fs::istream& input);
-    HostBuffer(Allocator& allocator, fs::istream& input, VkExtent3D extent);
+    HostBuffer(Allocator& allocator, fs::istream&& input);
+    HostBuffer(Allocator& allocator, fs::istream&& input, VkExtent3D extent);
     HostBuffer(const HostBuffer&) = delete;
     HostBuffer(HostBuffer&&) = default;
     virtual ~HostBuffer();
@@ -110,21 +113,43 @@ public:
 
     template <unsigned int N>
     void copy_to_buffer(Buffer<N>& out, CommandBuffer& cbuffer);
+};
+
+class HostImage : public HostBuffer {
+protected:
+    VkBuffer m_mip_buffer;
+    SingleAllocation m_mip_allocation;
+    int m_mip_levels;
+    VkFormat m_format;
+
+    HostImage(Allocator& allocator, VkFormat format)
+        : HostBuffer(allocator)
+        , m_mip_buffer(VK_NULL_HANDLE)
+        , m_mip_levels(1)
+        , m_format(format)
+    {
+    }
+
+public:
+    HostImage(const HostImage&) = delete;
+    HostImage(HostImage&&) = default;
+    virtual ~HostImage();
+
+    inline VkFormat format() const { return m_format; }
+    inline int mip_levels() const { return m_mip_levels; }
+
     template <unsigned int N>
     void copy_to_image(Image<N>& out, CommandBuffer& cbuffer);
 };
 
-class PNGImage : public HostBuffer {
+class PNGImage : public HostImage {
 private:
-    VkFormat m_format;
-
     static void decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length, VkExtent3D& out_extent);
 
 public:
     PNGImage(Allocator& allocator, fs::istream&& input);
+    PNGImage(Allocator& allocator, fs::istream&& input, fs::istream&& mip_input);
     PNGImage(PNGImage&&) = default;
-
-    inline constexpr VkFormat format() const { return VK_FORMAT_R8G8B8A8_SRGB; }
 };
 
 }
