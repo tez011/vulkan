@@ -130,6 +130,11 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
 endforeach()
 add_custom_target(shaders DEPENDS ${SPIRV_BINARY_FILES})
 
+# ---- Mipmap Generator ----
+add_executable(mipmapper
+    "src/mipmapper.cpp")
+target_link_libraries(mipmapper spdlog spng Vulkan::Vulkan)
+
 # ---- Application ----
 add_executable(game
     "src/main.cpp"

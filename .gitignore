@@ -1,6 +1,10 @@
+/build/
 /out/
 /resources/shaders
 /CMakePresets.json
 
+.DS_Store
 .vs/
 .vscode/
+
+*.mipdata.png
