@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace fs {
@@ -10,20 +11,19 @@ void init(const char* argv0 = nullptr);
 
 class file {
 private:
-    std::string m_path;
+    const std::string m_path;
 
 public:
     file(const std::string& path)
         : m_path(path)
     {
     }
-    ~file()
-    {
-    }
 
     const std::string& path() const { return m_path; }
     bool exists() const;
     bool is_directory() const;
+    std::string_view basename() const;
+    std::string_view extension(bool all = false) const;
 
     void mkdir() const;
     file parent() const;

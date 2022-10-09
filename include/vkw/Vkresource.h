@@ -95,16 +95,16 @@ protected:
 
     static VkBuffer create_buffer(VkDevice device, size_t length);
 
-    HostBuffer(Allocator& allocator)
+    HostBuffer(Allocator& allocator, const VkExtent3D& extent = { 0, 0, 0 })
         : m_allocator(allocator)
-        , m_extent({ 0, 0, 0 })
+        , m_extent(extent)
         , m_buffer(VK_NULL_HANDLE)
     {
     }
 
 public:
     HostBuffer(Allocator& allocator, fs::istream&& input);
-    HostBuffer(Allocator& allocator, fs::istream&& input, VkExtent3D extent);
+    HostBuffer(Allocator& allocator, fs::istream&& input, const VkExtent3D& extent);
     HostBuffer(const HostBuffer&) = delete;
     HostBuffer(HostBuffer&&) = default;
     virtual ~HostBuffer();
@@ -122,15 +122,12 @@ protected:
     int m_mip_levels;
     VkFormat m_format;
 
-    HostImage(Allocator& allocator, VkFormat format)
-        : HostBuffer(allocator)
-        , m_mip_buffer(VK_NULL_HANDLE)
-        , m_mip_levels(1)
-        , m_format(format)
-    {
-    }
+    static void decode_raw(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length);
+    static void decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length, VkExtent3D& out_extent);
 
 public:
+    HostImage(Allocator& allocator, fs::file&& input, const VkExtent3D& extent = { 0, 0, 0 }, VkFormat format = VK_FORMAT_UNDEFINED);
+    HostImage(Allocator& allocator, fs::file&& input, fs::file&& mipmap_input);
     HostImage(const HostImage&) = delete;
     HostImage(HostImage&&) = default;
     virtual ~HostImage();
@@ -140,16 +137,6 @@ public:
 
     template <unsigned int N>
     void copy_to_image(Image<N>& out, CommandBuffer& cbuffer);
-};
-
-class PNGImage : public HostImage {
-private:
-    static void decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length, VkExtent3D& out_extent);
-
-public:
-    PNGImage(Allocator& allocator, fs::istream&& input);
-    PNGImage(Allocator& allocator, fs::istream&& input, fs::istream&& mip_input);
-    PNGImage(PNGImage&&) = default;
 };
 
 }

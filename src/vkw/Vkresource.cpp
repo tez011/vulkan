@@ -192,7 +192,7 @@ HostBuffer::HostBuffer(Allocator& allocator, fs::istream&& input)
 {
 }
 
-HostBuffer::HostBuffer(Allocator& allocator, fs::istream&& input, VkExtent3D extent)
+HostBuffer::HostBuffer(Allocator& allocator, fs::istream&& input, const VkExtent3D& extent)
     : m_allocator(allocator)
     , m_extent(extent)
     , m_buffer(create_buffer(allocator.device(), input.length()))
@@ -223,6 +223,57 @@ VkBuffer HostBuffer::create_buffer(VkDevice device, size_t len)
 
     spdlog::critical("vkCreateBuffer: {}", res);
     abort();
+}
+
+HostImage::HostImage(Allocator& allocator, fs::file&& input, const VkExtent3D& extent, VkFormat format)
+    : HostBuffer(allocator, extent)
+    , m_format(format)
+    , m_mip_levels(1)
+{
+    std::unique_ptr<char[]> decoded;
+    size_t decoded_len = 0;
+
+    if (input.extension() == "png") {
+        decode_png(fs::istream(input), decoded, decoded_len, m_extent);
+        m_format = VK_FORMAT_R8G8B8A8_SRGB;
+    } else {
+        decode_raw(fs::istream(input), decoded, decoded_len);
+    }
+
+    m_buffer = create_buffer(allocator.device(), decoded_len);
+    allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
+    allocator.write_mapped(m_buffer_allocation, decoded.get(), decoded_len);
+}
+
+HostImage::HostImage(Allocator& allocator, fs::file&& input, fs::file&& mipmap_input)
+    : HostBuffer(allocator)
+{
+    std::unique_ptr<char[]> decoded[2];
+    size_t decoded_len[2];
+
+#ifndef NDEBUG
+    if (input.extension() != mipmap_input.extension()) {
+        spdlog::critical("HostImage: mipmap atlas format {} must match base image format {}", mipmap_input.extension(), input.extension());
+        abort();
+    }
+#endif
+    if (input.extension() == "png") {
+        decode_png(fs::istream(mipmap_input), decoded[1], decoded_len[1], m_extent);
+        decode_png(fs::istream(input), decoded[0], decoded_len[0], m_extent);
+        m_format = VK_FORMAT_R8G8B8A8_SRGB;
+    } else {
+        spdlog::critical("HostImage: unknown image format {}", input.extension());
+        abort();
+    }
+
+    m_buffer = create_buffer(allocator.device(), decoded_len[0]);
+    allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
+    allocator.write_mapped(m_buffer_allocation, decoded[0].get(), decoded_len[0]);
+
+    m_mip_levels = static_cast<uint32_t>(std::floor(std::log2(std::max(m_extent.width, m_extent.height)))) + 1;
+    m_mip_buffer = create_buffer(allocator.device(), decoded_len[1]);
+    allocator.allocate(m_mip_buffer, MemoryUsage::HostLocal, m_mip_allocation);
+    allocator.write_mapped(m_mip_allocation, decoded[1].get(), decoded_len[1]);
 }
 
 HostImage::~HostImage()
@@ -292,35 +343,6 @@ void HostImage::copy_to_image(Image<N>& out, CommandBuffer& command)
         0, nullptr, 0, nullptr, N, barrier.data());
 }
 
-template void HostImage::copy_to_image(Image<1>&, CommandBuffer&);
-template void HostImage::copy_to_image(Image<2>&, CommandBuffer&);
-
-PNGImage::PNGImage(Allocator& allocator, fs::istream&& input)
-    : HostImage(allocator, VK_FORMAT_R8G8B8A8_SRGB)
-{
-    std::unique_ptr<char[]> decoded;
-    size_t decoded_len = 0;
-    decode_png(input, decoded, decoded_len, m_extent);
-
-    m_buffer = create_buffer(allocator.device(), decoded_len);
-    allocator.allocate(m_buffer, MemoryUsage::HostLocal, m_buffer_allocation);
-    allocator.write_mapped(m_buffer_allocation, decoded.get(), decoded_len);
-}
-
-PNGImage::PNGImage(Allocator& allocator, fs::istream&& input, fs::istream&& mip_input)
-    : PNGImage(allocator, std::move(input))
-{
-    std::unique_ptr<char[]> decoded;
-    size_t decoded_len = 0;
-    VkExtent3D mip_extent; // unused
-    decode_png(mip_input, decoded, decoded_len, mip_extent);
-
-    m_mip_levels = static_cast<uint32_t>(std::floor(std::log2(std::max(m_extent.width, m_extent.height)))) + 1;
-    m_mip_buffer = create_buffer(allocator.device(), decoded_len);
-    allocator.allocate(m_mip_buffer, MemoryUsage::HostLocal, m_mip_allocation);
-    allocator.write_mapped(m_mip_allocation, decoded.get(), decoded_len);
-}
-
 static int png_read(spng_ctx* ctx, void* user, void* dst, size_t length)
 {
     fs::istream* input = reinterpret_cast<fs::istream*>(user);
@@ -333,7 +355,7 @@ static int png_read(spng_ctx* ctx, void* user, void* dst, size_t length)
         return SPNG_IO_ERROR;
 }
 
-void PNGImage::decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length, VkExtent3D& out_extent)
+void HostImage::decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length, VkExtent3D& out_extent)
 {
     int res = 0;
     spng_ctx* ctx = spng_ctx_new(0);
@@ -364,6 +386,16 @@ void PNGImage::decode_png(fs::istream& input, std::unique_ptr<char[]>& out_data,
     }
     spng_ctx_free(ctx);
 }
+
+void HostImage::decode_raw(fs::istream& input, std::unique_ptr<char[]>& out_data, size_t& out_length)
+{
+    out_length = input.length();
+    out_data = std::make_unique<char[]>(out_length);
+    input.read(out_data.get(), out_length);
+}
+
+template void HostImage::copy_to_image(Image<1>&, CommandBuffer&);
+template void HostImage::copy_to_image(Image<2>&, CommandBuffer&);
 
 size_t FormatWidth(VkFormat fmt)
 {
@@ -530,5 +562,4 @@ size_t FormatWidth(VkFormat fmt)
         abort();
     }
 }
-
 }

@@ -105,6 +105,25 @@ bool file::is_directory() const
     return stat.filetype == PHYSFS_FILETYPE_DIRECTORY;
 }
 
+std::string_view file::basename() const
+{
+    size_t last_sep = m_path.find_last_of('/');
+    if (last_sep == std::string::npos)
+        return std::string_view(m_path);
+    else
+        return std::string_view(m_path).substr(last_sep + 1);
+}
+
+std::string_view file::extension(bool all) const
+{
+    std::string_view filename = basename();
+    size_t ext_start = all ? filename.find_first_of('.') : filename.find_last_of('.');
+    if (ext_start == std::string_view::npos)
+        return std::string_view { "" };
+    else
+        return filename.substr(ext_start + 1);
+}
+
 void file::mkdir() const
 {
     if (PHYSFS_mkdir(m_path.c_str()) == 0) {

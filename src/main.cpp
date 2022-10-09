@@ -103,7 +103,7 @@ int main(int argc, char** argv)
     vkw::Allocation<2> uniform_buffer_allocation;
     allocator.allocate(uniform_buffer, vkw::MemoryUsage::HostLocal, uniform_buffer_allocation);
 
-    vkw::PNGImage texture_data(allocator, fs::istream("/rs/homer.png"), fs::istream("/rs/homer.mipdata.png"));
+    vkw::HostImage texture_data(allocator, fs::file("/rs/homer.png"), fs::file("/rs/homer.mipdata.png"));
     vkw::Image<1> texture_image(device, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 1, texture_data.mip_levels(), 1, texture_data.format(), texture_data.extent(), { vkw::QueueFamilyType::Graphics });
     vkw::ImageView<1> texture_image_view(device);
     vkw::Allocation<1> texture_image_allocation;
