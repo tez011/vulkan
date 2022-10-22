@@ -24,7 +24,6 @@ enum class MemoryUsage {
 
 class SingleAllocation {
 private:
-    Allocator* m_allocator;
     uint64_t m_chunk_id;
     size_t m_block_index, m_type_index;
     VkDeviceMemory m_memory;
@@ -35,25 +34,13 @@ private:
     friend class GarbageCollector;
 
 public:
-    SingleAllocation()
-        : m_allocator(nullptr)
-        , m_chunk_id(0)
-        , m_block_index(0)
-        , m_type_index(0)
-        , m_memory(VK_NULL_HANDLE)
-        , m_offset(0)
-        , m_size(0) {};
-    inline operator bool() const { return m_allocator && m_chunk_id != 0 && m_size != 0; };
+    SingleAllocation();
+
+    inline operator bool() const { return m_chunk_id != 0 && m_size != 0; };
     VkDeviceMemory memory() const { return m_memory; };
     VkDeviceAddress offset() const { return m_offset; };
     VkDeviceSize size() const { return m_size; };
-
-    void free();
-};
-
-template <unsigned int N>
-class Allocation : public std::array<SingleAllocation, N> {
-    static_assert(N == 1 || N == 2);
+    void reset();
 };
 
 class Device;
@@ -152,46 +139,6 @@ public:
     void unmap_memory(const SingleAllocation&);
     void flush_memory(const SingleAllocation&) const;
     void invalidate(const SingleAllocation&) const;
-    void write_mapped(const SingleAllocation& dst, const void* src, size_t len);
-
-    template <unsigned int N>
-    bool allocate(const Buffer<N>& buffer, MemoryUsage usage, Allocation<N>& out)
-    {
-        int i;
-        for (i = 0; i < N; i++) {
-            if (allocate(buffer.m_handle[i], usage, out[i]) == false) {
-                free(out);
-                return false;
-            }
-        }
-        return true;
-    }
-    template <unsigned int N>
-    bool allocate(const Image<N>& image, MemoryUsage usage, Allocation<N>& out)
-    {
-        int i;
-        for (i = 0; i < N; i++) {
-            if (allocate(image.m_handle[i], usage, out[i]) == false) {
-                free(out);
-                return false;
-            }
-        }
-        return true;
-    }
-    template <typename T, unsigned int N>
-    bool reallocate(const T& t, MemoryUsage usage, Allocation<N>& out)
-    {
-        free(out);
-        return allocate(t, usage, out);
-    }
-    template <unsigned int N>
-    void free(Allocation<N>& allocation)
-    {
-        for (SingleAllocation& s : allocation)
-            free(s);
-    }
-    template <unsigned int N>
-    void write_mapped(const Allocation<N>& dst, const void* src, size_t len);
 };
 
 }

@@ -59,7 +59,7 @@ public:
         Builder& with_texture_filtering(VkFilter min_filter, VkFilter mag_filter);
         Builder& with_mipmap_filtering(VkSamplerMipmapMode mode);
         Builder& with_address_mode(VkSamplerAddressMode u, VkSamplerAddressMode v, VkSamplerAddressMode w);
-        Builder& with_anisotropy(bool enable, float ratio);
+        Builder& with_anisotropy(float ratio);
         Builder& with_compare(bool enable, VkCompareOp operation);
         Builder& with_lod_bounds(float min_lod, float max_lod, float lod_bias = 0);
         Builder& with_border_color(VkBorderColor border_color);
@@ -265,7 +265,6 @@ public:
 
     private:
         size_t m_index;
-        VkPipelineBindPoint m_pipeline_bind_point;
         std::vector<VkAttachmentReference> m_input_attachments, m_color_attachments, m_resolve_attachments;
         bool m_has_depth_attachment;
         VkAttachmentReference m_depth_attachment;
@@ -273,7 +272,6 @@ public:
 
         Subpass(size_t index, VkPipelineBindPoint bp)
             : m_index(index)
-            , m_pipeline_bind_point(bp)
             , m_has_depth_attachment(false)
             , m_depth_attachment()
         {
@@ -329,8 +327,8 @@ protected:
     VkPipeline m_handle;
 
     Pipeline(const Device& device)
-        : m_device(device)
-        , m_descriptor_set_layout()
+        : m_descriptor_set_layout()
+        , m_device(device)
         , m_layout(VK_NULL_HANDLE)
         , m_handle(VK_NULL_HANDLE)
     {
@@ -467,7 +465,6 @@ public:
 
 class CommandBuffer {
 private:
-    const CommandPool& m_pool;
     VkCommandBuffer m_handle;
     VkCommandBufferLevel m_level;
 
@@ -476,9 +473,8 @@ private:
 
     friend class CommandPool;
 
-    CommandBuffer(const CommandPool& pool, VkCommandBuffer buffer, VkCommandBufferLevel level)
-        : m_pool(pool)
-        , m_handle(buffer)
+    CommandBuffer(VkCommandBuffer buffer, VkCommandBufferLevel level)
+        : m_handle(buffer)
         , m_level(level)
         , m_bound_pipeline_bind_point(VK_PIPELINE_BIND_POINT_MAX_ENUM)
         , m_bound_pipeline_layout(VK_NULL_HANDLE)
@@ -511,6 +507,7 @@ public:
     void bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
     void bind_pipeline(const Pipeline&);
     void bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize offset);
+    void set_image_layout(VkImage image, VkImageLayout from, VkImageLayout to, VkImageSubresourceRange& subresource, VkPipelineStageFlags src_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkPipelineStageFlags dst_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     void set_viewport(float x, float y, float width, float height, float min_depth, float max_depth);
     void set_scissor(int32_t x, int32_t y, uint32_t width, uint32_t height);
 

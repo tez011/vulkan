@@ -26,6 +26,23 @@ static bool on_same_page(
     return a_page_end == b_page_start;
 }
 
+SingleAllocation::SingleAllocation()
+    : m_chunk_id(0)
+    , m_block_index(0)
+    , m_type_index(0)
+    , m_memory(VK_NULL_HANDLE)
+    , m_offset(0)
+    , m_size(0)
+{
+}
+
+void SingleAllocation::reset()
+{
+    m_chunk_id = 0;
+    m_offset = m_size = 0;
+    m_memory = VK_NULL_HANDLE;
+}
+
 Allocator::Allocator(const Device& device, bool best_fit)
     : m_device(device)
     , m_best_fit(best_fit)
@@ -84,7 +101,6 @@ bool Allocator::allocate(VkMemoryRequirements requirements, VkMemoryPropertyFlag
             if (!pool[i])
                 continue;
 
-            out.m_allocator = this;
             out.m_block_index = i;
             out.m_type_index = type_index;
             out.m_memory = pool[i]->m_handle;
@@ -110,7 +126,6 @@ bool Allocator::allocate(VkMemoryRequirements requirements, VkMemoryPropertyFlag
         }
     }
 
-    out.m_allocator = this;
     out.m_block_index = insert_block(m_pools[type_index], new_block);
     out.m_type_index = type_index;
     out.m_memory = m_pools[type_index][out.m_block_index]->m_handle;
@@ -347,24 +362,6 @@ void Allocator::invalidate(const SingleAllocation& a) const
     }
 }
 
-void Allocator::write_mapped(const SingleAllocation& dst, const void* src, size_t len)
-{
-    void* dst_addr = map_memory(dst);
-    memcpy(dst_addr, src, len);
-    unmap_memory(dst);
-}
-
-template <>
-void Allocator::write_mapped(const Allocation<1>& dst, const void* src, size_t len)
-{
-    write_mapped(dst[0], src, len);
-}
-template <>
-void Allocator::write_mapped(const Allocation<2>& dst, const void* src, size_t len)
-{
-    write_mapped(dst[m_device.current_frame() % 2], src, len);
-}
-
 Allocator::DMemBlock::DMemBlock(VkDeviceMemory handle, VkDeviceSize size, bool best_fit)
     : m_handle(handle)
     , m_size(size)
@@ -494,12 +491,6 @@ VkDeviceSize Allocator::DMemBlock::allocated() const
             total += ch.second.m_size;
     }
     return total;
-}
-
-void SingleAllocation::free()
-{
-    if (m_allocator)
-        m_allocator->free(*this);
 }
 
 }

@@ -84,34 +84,24 @@ int main(int argc, char** argv)
     fs.load_from(fs::istream("/rs/shaders/tri.frag.spv"));
 
     vkw::Allocator allocator(device, true);
-    vkw::Buffer<1> vertex_buffer(device, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sizeof(mesh[0]) * mesh.size(), { vkw::QueueFamilyType::Graphics });
-    vkw::Allocation<1> vertex_buffer_allocation;
-    allocator.allocate(vertex_buffer, vkw::MemoryUsage::HostLocal, vertex_buffer_allocation);
-    allocator.write_mapped(vertex_buffer_allocation, mesh.data(), vertex_buffer.size());
-    vkw::Buffer<1> index_buffer(device, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sizeof(mesh_indexes[0]) * mesh_indexes.size(), { vkw::QueueFamilyType::Graphics });
-    vkw::Allocation<1> index_buffer_allocation;
-    allocator.allocate(index_buffer, vkw::MemoryUsage::HostLocal, index_buffer_allocation);
-    allocator.write_mapped(index_buffer_allocation, mesh_indexes.data(), index_buffer.size());
-    vkw::Image<2> depth_buffer(device, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 1, 1, 1,
-        VK_FORMAT_D24_UNORM_S8_UINT, { device.swapchain().width(), device.swapchain().height(), 1 }, { vkw::QueueFamilyType::Graphics });
+    vkw::Image<2> depth_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, { device.swapchain().width(), device.swapchain().height(), 1 }, VK_FORMAT_D24_UNORM_S8_UINT, 1, 1, 1);
     vkw::ImageView<2> depth_buffer_view(device);
-    vkw::Allocation<2> depth_buffer_allocation;
-    allocator.allocate(depth_buffer, vkw::MemoryUsage::DeviceLocal, depth_buffer_allocation);
     depth_buffer_view.create(depth_buffer, VK_IMAGE_VIEW_TYPE_2D, depth_buffer.format(), VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
 
-    vkw::Buffer<2> uniform_buffer(device, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(MVP), { vkw::QueueFamilyType::Graphics });
-    vkw::Allocation<2> uniform_buffer_allocation;
-    allocator.allocate(uniform_buffer, vkw::MemoryUsage::HostLocal, uniform_buffer_allocation);
+    vkw::HostBuffer<1> vertex_data(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, mesh.data(), mesh.size() * sizeof(Vertex));
+    vkw::HostBuffer<1> index_data(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, mesh_indexes.data(), mesh_indexes.size() * sizeof(uint16_t));
+    vkw::HostBuffer<2> uniform_buffer(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(MVP));
+    vkw::Buffer<1> vertex_buffer(vertex_data, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT), index_buffer(index_data, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
-    vkw::HostImage texture_data(allocator, fs::file("/rs/homer.png"), fs::file("/rs/homer.mipdata.png"));
-    vkw::Image<1> texture_image(device, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 1, texture_data.mip_levels(), 1, texture_data.format(), texture_data.extent(), { vkw::QueueFamilyType::Graphics });
+    vkw::HostImage texture_data(allocator, vkw::HostImage::InputFormat::PNG, fs::istream("/rs/homer.png"), true);
+    vkw::Image<1> texture_image(texture_data, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_USAGE_SAMPLED_BIT);
     vkw::ImageView<1> texture_image_view(device);
-    vkw::Allocation<1> texture_image_allocation;
-    allocator.allocate(texture_image, vkw::MemoryUsage::DeviceLocal, texture_image_allocation);
-    texture_image_view.create(texture_image, VK_IMAGE_VIEW_TYPE_2D, texture_image.format());
     vkw::Sampler texture_sampler(device);
+    texture_image_view.create(texture_image, VK_IMAGE_VIEW_TYPE_2D, texture_image.format());
     texture_sampler.build(vkw::Sampler::Builder()
                               .with_texture_filtering(VK_FILTER_LINEAR, VK_FILTER_LINEAR)
+                              .with_mipmap_filtering(VK_SAMPLER_MIPMAP_MODE_LINEAR)
+                              .with_anisotropy(device.max_anisotropy())
                               .with_address_mode(VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT));
 
     vkw::RenderPass render_pass(device);
@@ -140,11 +130,9 @@ int main(int argc, char** argv)
         VkExtent3D swapchain_extent = { device.swapchain().width(), device.swapchain().height(), 1 };
         retirer.add(depth_buffer);
         retirer.add(depth_buffer_view);
-        retirer.add(depth_buffer_allocation);
         retirer.add(framebuffer);
 
         depth_buffer.resize(swapchain_extent);
-        allocator.allocate(depth_buffer, vkw::MemoryUsage::DeviceLocal, depth_buffer_allocation);
         depth_buffer_view.create(depth_buffer, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_D24_UNORM_S8_UINT, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
         render_pass.create_framebuffers()
             .with_swapchain_attachment(0)
@@ -172,12 +160,15 @@ int main(int argc, char** argv)
     vkw::DescriptorSet descriptor_set = descriptor_pool.allocate(pipelines[0].descriptor_set_layout(0));
 
     vkw::CommandPool command_pool(device, vkw::QueueFamilyType::Graphics, 1, 0);
-    auto& cbuffer = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
-    cbuffer.begin(true);
-    texture_data.copy_to_image(texture_image, cbuffer);
-    cbuffer.end();
+    auto& cmd = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
+    cmd.begin(true);
+    vertex_buffer.copy_from(vertex_data, cmd);
+    index_buffer.copy_from(index_data, cmd);
+    texture_image.copy_from(texture_data, cmd);
+    texture_image.set_layout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, cmd);
+    cmd.end();
     device.submit_commands()
-        .add(cbuffer)
+        .add(cmd)
         .to_queue(vkw::QueueFamilyType::Graphics, 0);
     vkDeviceWaitIdle(device);
 
@@ -197,7 +188,7 @@ int main(int argc, char** argv)
         mvp.view = glm::lookAt(glm::vec3(1.5f, 1.5f, 1.5f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         mvp.proj = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 0.1f, 10.f);
         mvp.proj[1][1] *= -1;
-        allocator.write_mapped(uniform_buffer_allocation, &mvp, sizeof(MVP));
+        uniform_buffer.write_mapped(&mvp, sizeof(MVP));
         descriptor_set.bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 0, VK_WHOLE_SIZE);
         descriptor_set.bind_image(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, texture_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture_sampler);
         descriptor_set.update();
@@ -223,10 +214,5 @@ int main(int argc, char** argv)
         device.present_image({ render_finished });
     }
 
-    allocator.free(texture_image_allocation);
-    allocator.free(uniform_buffer_allocation);
-    allocator.free(depth_buffer_allocation);
-    allocator.free(index_buffer_allocation);
-    allocator.free(vertex_buffer_allocation);
     vkDeviceWaitIdle(device);
 }

@@ -141,7 +141,7 @@ file file::parent() const
         return file(m_path.substr(0, end));
 }
 
-file file::relative(const std::string& rel_path) const
+file file::relative(std::string_view rel_path) const
 {
     std::string p;
     if (is_directory()) {
@@ -155,23 +155,24 @@ file file::relative(const std::string& rel_path) const
     }
     p.reserve(p.length() + rel_path.length());
 
-    const char *i = rel_path.c_str(), *end = i + rel_path.length(), *n;
-    size_t il;
-    do {
-        n = strchr(i, '/');
-        il = n ? n - i + 1 : end - i;
-        if (strncmp(i, "../", 3) == 0) {
+    std::string_view i = rel_path;
+    while (true) {
+        size_t n = i.find('/');
+        if (i.substr(0, 3) == "../") {
             size_t end = p.find_last_of('/');
             if (end == 0)
                 p = "/";
             else
                 p = p.substr(0, end);
-        } else if (strncmp(i, "./", 2) != 0) {
-            p += '/';
-            p.append(i, il);
+        } else if (i.substr(0, 2) != "./") {
+            p += "/";
+            p += i.substr(0, n);
         }
-        i = n + 1;
-    } while (n);
+        if (n == std::string_view::npos)
+            break;
+        else
+            i = i.substr(n + 1);
+    }
 
     return file(p);
 }

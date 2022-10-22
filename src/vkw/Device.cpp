@@ -200,7 +200,7 @@ VkPhysicalDevice Device::pick_physical_device()
         VkPhysicalDeviceVulkan11Features available_features11 {};
         available_features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
         available_features11.pNext = &available_features12;
-        VkPhysicalDeviceFeatures2 available_features {}, features {};
+        VkPhysicalDeviceFeatures2 available_features {};
         available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         available_features.pNext = &available_features11;
         vkGetPhysicalDeviceFeatures2(device, &available_features);
@@ -236,19 +236,7 @@ VkPhysicalDevice Device::pick_physical_device()
     return VK_NULL_HANDLE;
 }
 
-static void fill_queue_priorities(std::vector<float>& priorities, size_t queue_count)
-{
-    priorities.assign(queue_count, 0.f);
-    priorities[0] = 1.f;
-    if (queue_count > 4)
-        priorities[1] = 1.f;
-    if (queue_count > 8)
-        priorities[2] = 1.f;
-    if (queue_count > 15)
-        priorities[3] = 1.f;
-}
-
-static float* allocate_queue_properties(size_t count)
+static float* allocate_queue_priorities(size_t count)
 {
     float* f = new float[count];
     memset(f, 0, sizeof(float) * count);
@@ -303,14 +291,14 @@ std::vector<VkDeviceQueueCreateInfo> Device::describe_device_queues()
     combined_ci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     combined_ci.queueFamilyIndex = combined_queue;
     combined_ci.queueCount = qfprop[combined_queue].queueCount;
-    combined_ci.pQueuePriorities = allocate_queue_properties(combined_ci.queueCount);
+    combined_ci.pQueuePriorities = allocate_queue_priorities(combined_ci.queueCount);
     createinfos.push_back(combined_ci);
     if (async_compute_queue != -1) {
         VkDeviceQueueCreateInfo ci {};
         ci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         ci.queueFamilyIndex = async_compute_queue;
         ci.queueCount = std::min(4U, qfprop[async_compute_queue].queueCount);
-        ci.pQueuePriorities = allocate_queue_properties(ci.queueCount);
+        ci.pQueuePriorities = allocate_queue_priorities(ci.queueCount);
         createinfos.push_back(ci);
     }
     if (best_transfer_queue.first != -1) {
@@ -318,7 +306,7 @@ std::vector<VkDeviceQueueCreateInfo> Device::describe_device_queues()
         ci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         ci.queueFamilyIndex = best_transfer_queue.first;
         ci.queueCount = std::min(4U, qfprop[best_transfer_queue.first].queueCount);
-        ci.pQueuePriorities = allocate_queue_properties(ci.queueCount);
+        ci.pQueuePriorities = allocate_queue_priorities(ci.queueCount);
         createinfos.push_back(ci);
     }
 
@@ -364,6 +352,10 @@ void Device::create_logical_device()
 
     m_device_features.features.depthClamp = true;
     m_device_features.features.sampleRateShading = true;
+    if (available_features.features.samplerAnisotropy) {
+        m_device_features.features.samplerAnisotropy = true;
+        m_max_anisotropy = properties.limits.maxSamplerAnisotropy;
+    }
     // Enable features in features{,11,12} if they're on in available_features{,11,12}.
 
     std::vector<VkDeviceQueueCreateInfo> queue_createinfos = describe_device_queues();
@@ -629,14 +621,14 @@ void GarbageCollector::add(Framebuffer& framebuffer)
 
 void GarbageCollector::retire(Device& device)
 {
+    for (auto& x : m_allocations)
+        x.first->free(x.second);
     for (auto& x : m_framebuffers)
         vkDestroyFramebuffer(device, x, nullptr);
     for (auto& x : m_images)
         vkDestroyImage(device, x, nullptr);
     for (auto& x : m_image_views)
         vkDestroyImageView(device, x, nullptr);
-    for (auto& x : m_allocations)
-        x.free();
 }
 
 QueueSubmission& QueueSubmission::wait_on(VkSemaphore sem, VkPipelineStageFlags stage)

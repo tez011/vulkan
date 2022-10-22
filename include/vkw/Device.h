@@ -1,7 +1,7 @@
 #pragma once
 
 #define GLFW_INCLUDE_VULKAN
-#define VK_API_VERSION VK_API_VERSION_1_2
+#define VK_API_VERSION VK_API_VERSION_1_3
 
 #include <GLFW/glfw3.h>
 #include <array>
@@ -14,10 +14,13 @@
 namespace vkw {
 
 class CommandBuffer;
+template <unsigned int>
+class Allocation;
 class Framebuffer;
 template <unsigned int>
+class Image;
+template <unsigned int>
 class ImageView;
-class SingleAllocation;
 
 class Swapchain {
 private:
@@ -52,29 +55,28 @@ enum class QueueFamilyType {
 
 class GarbageCollector {
 private:
+    friend class Device;
+
     std::unique_ptr<Swapchain> m_swapchain;
     std::vector<VkFramebuffer> m_framebuffers;
     std::vector<VkImage> m_images;
     std::vector<VkImageView> m_image_views;
-    std::vector<SingleAllocation> m_allocations;
+    std::vector<std::pair<Allocator*, SingleAllocation>> m_allocations;
 
     void retire(Device& device);
-
-    friend class Device;
 
 public:
     void add(std::unique_ptr<Swapchain>&& s) { m_swapchain = std::move(s); }
     template <unsigned int N>
-    void add(Allocation<N>& x)
-    {
-        m_allocations.insert(m_allocations.end(), x.begin(), x.end());
-        x.fill(SingleAllocation());
-    }
-    template <unsigned int N>
     void add(Image<N>& x)
     {
-        for (int i = 0; i < N; i++)
+        for (int i = 0; i < N; i++) {
             m_images.push_back(x[i]);
+            auto& allocation = m_allocations.emplace_back();
+            allocation.first = &x.allocation().allocator();
+            allocation.second = x.allocation()[i];
+            x.allocation()[i].reset();
+        }
     }
     template <unsigned int N>
     void add(ImageView<N>& x)
@@ -132,7 +134,6 @@ private:
     uint32_t m_swapchain_image_index;
     std::atomic_uint32_t m_frame_number = 0;
     std::function<void(const Device&, GarbageCollector&)> m_recreate_swapchain_cb;
-
     struct {
         int32_t combined, compute, transfer;
         uint32_t combined_count, compute_count, transfer_count;
@@ -141,6 +142,8 @@ private:
     VkPhysicalDeviceFeatures2 m_device_features {};
     VkPhysicalDeviceVulkan11Features m_device_features11 {};
     VkPhysicalDeviceVulkan12Features m_device_features12 {};
+
+    float m_max_anisotropy = 0;
 
     VkPhysicalDevice pick_physical_device();
     std::vector<VkDeviceQueueCreateInfo> describe_device_queues();
@@ -161,6 +164,7 @@ public:
     inline const VkPhysicalDeviceFeatures& features10() const { return m_device_features.features; }
     inline const VkPhysicalDeviceVulkan11Features& features11() const { return m_device_features11; }
     inline const VkPhysicalDeviceVulkan12Features& features12() const { return m_device_features12; }
+    inline const float max_anisotropy() const { return m_max_anisotropy; }
 
     int32_t queue_family_index(QueueFamilyType t) const;
     uint32_t queue_count(QueueFamilyType t) const;

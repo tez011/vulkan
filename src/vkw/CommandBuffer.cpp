@@ -41,7 +41,7 @@ CommandPool::CommandPool(const Device& device, QueueFamilyType ty, size_t primar
             abort();
         }
         for (size_t j = 0; j < primary; j++)
-            m_buffers[2 * i].push_back(CommandBuffer(*this, pHandles[j], allocinfo.level));
+            m_buffers[2 * i].push_back(CommandBuffer(pHandles[j], allocinfo.level));
 
         if (secondary > 0) {
             allocinfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
@@ -51,7 +51,7 @@ CommandPool::CommandPool(const Device& device, QueueFamilyType ty, size_t primar
                 abort();
             }
             for (size_t j = 0; j < secondary; j++)
-                m_buffers[2 * i + 1].push_back(CommandBuffer(*this, sHandles[j], allocinfo.level));
+                m_buffers[2 * i + 1].push_back(CommandBuffer(sHandles[j], allocinfo.level));
         }
     }
 }
@@ -162,6 +162,38 @@ void CommandBuffer::bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDevi
     vkCmdBindVertexBuffers(*this, binding, 1, &buffer, &offset);
 }
 
+static constexpr VkAccessFlags image_layout_access_mask(VkImageLayout layout)
+{
+    switch (layout) {
+    case VK_IMAGE_LAYOUT_UNDEFINED:
+        return 0;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        return VK_ACCESS_TRANSFER_READ_BIT;
+    case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+        return VK_ACCESS_TRANSFER_WRITE_BIT;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        return VK_ACCESS_SHADER_READ_BIT;
+    default:
+        spdlog::critical("image_layout_stage_mask: unknown layout {}", layout);
+        abort();
+    }
+}
+
+void CommandBuffer::set_image_layout(VkImage image, VkImageLayout from, VkImageLayout to, VkImageSubresourceRange& subresource, VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask)
+{
+    VkImageMemoryBarrier barrier {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = image_layout_access_mask(from);
+    barrier.dstAccessMask = image_layout_access_mask(to);
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = subresource;
+
+    vkCmdPipelineBarrier(*this, src_stage_mask, dst_stage_mask, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
 void CommandBuffer::set_viewport(float x, float y, float w, float h, float min_depth, float max_depth)
 {
     VkViewport viewport;
@@ -190,5 +222,4 @@ void CommandBuffer::end()
         abort();
     }
 }
-
 }

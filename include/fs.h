@@ -27,7 +27,7 @@ public:
 
     void mkdir() const;
     file parent() const;
-    file relative(const std::string& rel_path) const;
+    file relative(std::string_view rel_path) const;
     std::vector<file> children() const;
 };
 

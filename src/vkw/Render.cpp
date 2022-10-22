@@ -802,7 +802,7 @@ std::vector<GraphicsPipeline> GraphicsPipeline::Builder::build()
 
     while (builders.empty() == false) {
         GraphicsPipeline::Builder* b = builders.front().first;
-        out_pipelines.push_back(std::move(GraphicsPipeline(m_device)));
+        out_pipelines.push_back(GraphicsPipeline(m_device));
         create_infos.emplace_back();
 
         b->m_vertex_input_state.vertexAttributeDescriptionCount = b->m_vertex_input_attributes.size();
@@ -879,9 +879,9 @@ Sampler::Builder& Sampler::Builder::with_address_mode(VkSamplerAddressMode u, Vk
     m_createinfo.addressModeW = w;
     return *this;
 }
-Sampler::Builder& Sampler::Builder::with_anisotropy(bool enable, float ratio)
+Sampler::Builder& Sampler::Builder::with_anisotropy(float ratio)
 {
-    m_createinfo.anisotropyEnable = enable;
+    m_createinfo.anisotropyEnable = ratio > 0;
     m_createinfo.maxAnisotropy = ratio;
     return *this;
 }
