@@ -50,6 +50,17 @@ public:
     {
     }
     virtual ~istream();
+
+    fs::istream& seekg(std::streampos pos)
+    {
+        std::istream::seekg(pos);
+        return *this;
+    }
+    fs::istream& seekg(std::streamoff off, ios_base::seekdir way)
+    {
+        std::istream::seekg(off, way);
+        return *this;
+    }
 };
 
 class ostream : public base_stream, public std::ostream {

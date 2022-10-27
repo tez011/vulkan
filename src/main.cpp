@@ -7,6 +7,7 @@
 #include "fs.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <spdlog/spdlog.h>
 
 static inline void glfw_error_callback(int code, const char* description)
@@ -14,7 +15,7 @@ static inline void glfw_error_callback(int code, const char* description)
     spdlog::error("[glfw] {}: {}", code, description);
 }
 
-struct MVP {
+struct UniformBuffer {
     glm::mat4 model;
     glm::mat4 view;
     glm::mat4 proj;
@@ -24,28 +25,7 @@ struct Vertex {
     glm::vec3 pos;
     glm::vec3 color;
     glm::vec2 tex_coord;
-
-    static void apply_to_pipeline(vkw::GraphicsPipeline::Builder& pipeline)
-    {
-        pipeline.add_vertex_input_binding(0, sizeof(Vertex));
-        pipeline.add_vertex_input_attribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, pos));
-        pipeline.add_vertex_input_attribute(0, 1, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, color));
-        pipeline.add_vertex_input_attribute(0, 2, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, tex_coord));
-    }
 };
-
-const std::vector<Vertex> mesh = {
-    { { -0.5f, -0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } },
-    { { 0.5f, -0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
-    { { 0.5f, 0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 1.0f } },
-    { { -0.5f, 0.5f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
-    { { -0.5f, -0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f } },
-    { { 0.5f, -0.5f, -0.5f }, { 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f } },
-    { { 0.5f, 0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 1.0f } },
-    { { -0.5f, 0.5f, -0.5f }, { 0.0f, 0.0f, 0.0f }, { 1.0f, 1.0f } },
-};
-
-const std::vector<uint16_t> mesh_indexes = { 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4 };
 
 GLFWwindow* create_window()
 {
@@ -80,26 +60,26 @@ int main(int argc, char** argv)
     vkw::Fence fence(device, true);
 
     vkw::ShaderModule vs(device), fs(device);
-    vs.load_from(fs::istream("/rs/shaders/tri.vert.spv"));
-    fs.load_from(fs::istream("/rs/shaders/tri.frag.spv"));
+    vs.load_from(fs::istream("/rs/shaders/duck.vert.spv"));
+    fs.load_from(fs::istream("/rs/shaders/duck.frag.spv"));
 
     vkw::Allocator allocator(device, true);
     vkw::Image<2> depth_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, { device.swapchain().width(), device.swapchain().height(), 1 }, VK_FORMAT_D24_UNORM_S8_UINT, 1, 1, 1);
     vkw::ImageView<2> depth_buffer_view(device);
     depth_buffer_view.create(depth_buffer, VK_IMAGE_VIEW_TYPE_2D, depth_buffer.format(), VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
 
-    vkw::HostBuffer<1> vertex_data(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, mesh.data(), mesh.size() * sizeof(Vertex));
-    vkw::HostBuffer<1> index_data(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, mesh_indexes.data(), mesh_indexes.size() * sizeof(uint16_t));
-    vkw::HostBuffer<2> uniform_buffer(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(MVP));
-    vkw::Buffer<1> vertex_buffer(vertex_data, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT), index_buffer(index_data, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    vkw::HostBuffer<1> duck_data(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, fs::istream("/rs/Duck0.bin"), 102040);
+    vkw::HostBuffer<2> uniform_buffer(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(UniformBuffer));
+    vkw::Buffer<1> vertex_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, 76768);
+    vkw::Buffer<1> index_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, 25272);
 
-    vkw::HostImage texture_data(allocator, vkw::HostImage::InputFormat::PNG, fs::istream("/rs/homer.png"), true);
+    vkw::HostImage texture_data(allocator, vkw::HostImage::InputFormat::PNG, fs::istream("/rs/DuckCM.png"), true);
     vkw::Image<1> texture_image(texture_data, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_USAGE_SAMPLED_BIT);
     vkw::ImageView<1> texture_image_view(device);
     vkw::Sampler texture_sampler(device);
     texture_image_view.create(texture_image, VK_IMAGE_VIEW_TYPE_2D, texture_image.format());
     texture_sampler.build(vkw::Sampler::Builder()
-                              .with_texture_filtering(VK_FILTER_LINEAR, VK_FILTER_LINEAR)
+                              .with_texture_filtering(VK_FILTER_NEAREST, VK_FILTER_LINEAR)
                               .with_mipmap_filtering(VK_SAMPLER_MIPMAP_MODE_LINEAR)
                               .with_anisotropy(device.max_anisotropy())
                               .with_address_mode(VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT));
@@ -143,7 +123,12 @@ int main(int argc, char** argv)
     vkw::GraphicsPipeline::Builder pb(device);
     pb.add_shader(vs);
     pb.add_shader(fs);
-    Vertex::apply_to_pipeline(pb); // Can models we import implement an interface that lets us call pb.set_vertex_bindings(MeshLike)?
+    pb.add_vertex_input_binding(0, 12);
+    pb.add_vertex_input_binding(1, 12);
+    pb.add_vertex_input_binding(2, 8);
+    pb.add_vertex_input_attribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pb.add_vertex_input_attribute(1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pb.add_vertex_input_attribute(2, 2, VK_FORMAT_R32G32_SFLOAT, 0);
     pb.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     pb.set_depth_clamp(false);
     pb.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -162,8 +147,8 @@ int main(int argc, char** argv)
     vkw::CommandPool command_pool(device, vkw::QueueFamilyType::Graphics, 1, 0);
     auto& cmd = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
     cmd.begin(true);
-    vertex_buffer.copy_from(vertex_data, cmd);
-    index_buffer.copy_from(index_data, cmd);
+    vertex_buffer.copy_from(duck_data, cmd, 0);
+    index_buffer.copy_from(duck_data, cmd, 76768);
     texture_image.copy_from(texture_data, cmd);
     texture_image.set_layout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, cmd);
     cmd.end();
@@ -180,15 +165,15 @@ int main(int argc, char** argv)
         device.acquire_next_image(image_available);
         command_pool.reset(false);
 
-        MVP mvp {};
+        UniformBuffer ubuffer {};
         static auto start_time = std::chrono::high_resolution_clock::now();
         auto now_time = std::chrono::high_resolution_clock::now();
         float time = std::chrono::duration<float, std::chrono::seconds::period>(now_time - start_time).count();
-        mvp.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        mvp.view = glm::lookAt(glm::vec3(1.5f, 1.5f, 1.5f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        mvp.proj = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 0.1f, 10.f);
-        mvp.proj[1][1] *= -1;
-        uniform_buffer.write_mapped(&mvp, sizeof(MVP));
+        ubuffer.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        ubuffer.view = glm::lookAt(glm::vec3(0.f, 250.f, 400.f), glm::vec3(0.0f, 100.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        ubuffer.proj = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 1.f, 10000.f);
+        ubuffer.proj[1][1] *= -1;
+        uniform_buffer.write_mapped(&ubuffer, sizeof(UniformBuffer));
         descriptor_set.bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 0, VK_WHOLE_SIZE);
         descriptor_set.bind_image(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, texture_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture_sampler);
         descriptor_set.update();
@@ -200,9 +185,11 @@ int main(int argc, char** argv)
         cbuffer.set_viewport(0, 0, (float)device.swapchain().width(), (float)device.swapchain().height(), 0, 1);
         cbuffer.set_scissor(0, 0, device.swapchain().width(), device.swapchain().height());
         cbuffer.bind_vertex_buffer(0, vertex_buffer, 0);
+        cbuffer.bind_vertex_buffer(1, vertex_buffer, 28788);
+        cbuffer.bind_vertex_buffer(2, vertex_buffer, 57576);
         cbuffer.bind_index_buffer(index_buffer, 0, VK_INDEX_TYPE_UINT16);
         cbuffer.bind_descriptor_set(0, descriptor_set);
-        vkCmdDrawIndexed(cbuffer, mesh_indexes.size(), 1, 0, 0, 0);
+        vkCmdDrawIndexed(cbuffer, 12636, 1, 0, 0, 0);
         vkCmdEndRenderPass(cbuffer);
         cbuffer.end();
 

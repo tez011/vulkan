@@ -94,7 +94,7 @@ void Buffer<N>::copy_from(Buffer<N>& src_buffer, CommandBuffer& cmd, VkDeviceSiz
     VkBufferCopy copy;
     copy.srcOffset = src_offset;
     copy.dstOffset = 0;
-    copy.size = src_buffer.m_size - src_offset;
+    copy.size = std::min(src_buffer.m_size - src_offset, m_size);
     for (unsigned int i = 0; i < N; i++)
         vkCmdCopyBuffer(cmd, src_buffer.m_handle[i], m_handle[i], 1, &copy);
 }
