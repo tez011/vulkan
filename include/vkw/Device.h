@@ -139,6 +139,7 @@ private:
         uint32_t combined_count, compute_count, transfer_count;
     } m_queue_family_indexes;
 
+    VkPhysicalDeviceLimits m_device_limits {};
     VkPhysicalDeviceFeatures2 m_device_features {};
     VkPhysicalDeviceVulkan11Features m_device_features11 {};
     VkPhysicalDeviceVulkan12Features m_device_features12 {};
@@ -161,6 +162,7 @@ public:
     inline operator VkDevice() const { return m_device; }
     inline const Swapchain& swapchain() const { return *m_swapchain; }
 
+    inline const VkPhysicalDeviceLimits& limits() const { return m_device_limits; }
     inline const VkPhysicalDeviceFeatures& features10() const { return m_device_features.features; }
     inline const VkPhysicalDeviceVulkan11Features& features11() const { return m_device_features11; }
     inline const VkPhysicalDeviceVulkan12Features& features12() const { return m_device_features12; }

@@ -150,11 +150,11 @@ void CommandBuffer::bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIn
     vkCmdBindIndexBuffer(*this, buffer, offset, type);
 }
 
-void CommandBuffer::bind_pipeline(const Pipeline& p)
+void CommandBuffer::bind_pipeline(const Pipeline& pipeline)
 {
-    m_bound_pipeline_bind_point = p.bind_point();
-    m_bound_pipeline_layout = p.layout();
-    vkCmdBindPipeline(*this, p.bind_point(), p);
+    m_bound_pipeline_bind_point = pipeline.bind_point();
+    m_bound_pipeline_layout = pipeline.layout();
+    vkCmdBindPipeline(*this, pipeline.bind_point(), pipeline);
 }
 
 void CommandBuffer::bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize offset)

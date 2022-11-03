@@ -58,10 +58,9 @@ int main(int argc, char** argv)
     vkw::Device device(window);
     vkw::Semaphore image_available(device), render_finished(device);
     vkw::Fence fence(device, true);
-
-    vkw::ShaderModule vs(device), fs(device);
-    vs.load_from(fs::istream("/rs/shaders/duck.vert.spv"));
-    fs.load_from(fs::istream("/rs/shaders/duck.frag.spv"));
+    vkw::ShaderFactory shader_factory(device);
+    shader_factory.open(fs::file("/rs/shaders/duck.vert.spv"));
+    shader_factory.open(fs::file("/rs/shaders/duck.frag.spv"));
 
     vkw::Allocator allocator(device, true);
     vkw::Image<2> depth_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, { device.swapchain().width(), device.swapchain().height(), 1 }, VK_FORMAT_D24_UNORM_S8_UINT, 1, 1, 1);
@@ -120,15 +119,14 @@ int main(int argc, char** argv)
             .build(framebuffer);
     });
 
-    vkw::GraphicsPipeline::Builder pb(device);
-    pb.add_shader(vs);
-    pb.add_shader(fs);
-    pb.add_vertex_input_binding(0, 12);
-    pb.add_vertex_input_binding(1, 12);
-    pb.add_vertex_input_binding(2, 8);
-    pb.add_vertex_input_attribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0);
-    pb.add_vertex_input_attribute(1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0);
-    pb.add_vertex_input_attribute(2, 2, VK_FORMAT_R32G32_SFLOAT, 0);
+    vkw::PipelineFactory pipeline_factory(device, shader_factory);
+    vkw::PipelineFactory::GraphicsPipelineSpecification pb({ "/rs/shaders/duck.vert.spv", "/rs/shaders/duck.frag.spv" });
+    pb.set_vertex_input_binding(0, 12);
+    pb.set_vertex_input_binding(1, 12);
+    pb.set_vertex_input_binding(2, 8);
+    pb.set_vertex_input_attribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pb.set_vertex_input_attribute(1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pb.set_vertex_input_attribute(2, 2, VK_FORMAT_R32G32_SFLOAT, 0);
     pb.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     pb.set_depth_clamp(false);
     pb.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -138,11 +136,11 @@ int main(int argc, char** argv)
     pb.set_depth_write(true);
     pb.set_attachment_color_blend_info(0, true, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA);
     pb.set_attachment_alpha_blend_info(0, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO);
-    pb.assign_to_subpass(render_pass, 0);
-    std::vector<vkw::GraphicsPipeline> pipelines = pb.build();
+    pb.set_render_pass(render_pass, 0);
+    vkw::Pipeline& pipeline = pipeline_factory.get(pb);
 
     vkw::DescriptorPool descriptor_pool(device);
-    vkw::DescriptorSet descriptor_set = descriptor_pool.allocate(pipelines[0].descriptor_set_layout(0));
+    vkw::DescriptorSet descriptor_set = descriptor_pool.allocate(pipeline.descriptor_set_layout(0));
 
     vkw::CommandPool command_pool(device, vkw::QueueFamilyType::Graphics, 1, 0);
     auto& cmd = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
@@ -181,7 +179,7 @@ int main(int argc, char** argv)
         auto& cbuffer = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
         cbuffer.begin();
         cbuffer.begin_render_pass(render_pass, framebuffer, VK_SUBPASS_CONTENTS_INLINE);
-        cbuffer.bind_pipeline(pipelines[0]);
+        cbuffer.bind_pipeline(pipeline);
         cbuffer.set_viewport(0, 0, (float)device.swapchain().width(), (float)device.swapchain().height(), 0, 1);
         cbuffer.set_scissor(0, 0, device.swapchain().width(), device.swapchain().height());
         cbuffer.bind_vertex_buffer(0, vertex_buffer, 0);

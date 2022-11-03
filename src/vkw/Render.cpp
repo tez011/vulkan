@@ -5,24 +5,6 @@
 
 namespace vkw {
 
-std::vector<VkDynamicState> GraphicsPipeline::Builder::s_dynamic_states = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-VkPipelineDynamicStateCreateInfo GraphicsPipeline::Builder::s_dynamic_state {
-    VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-    nullptr,
-    0,
-    static_cast<uint32_t>(s_dynamic_states.size()),
-    s_dynamic_states.data(),
-};
-VkPipelineViewportStateCreateInfo GraphicsPipeline::Builder::s_viewport_state {
-    VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-    nullptr,
-    0,
-    1,
-    &s_viewport_state_viewport,
-    1,
-    &s_viewport_state_scissor,
-};
-
 Fence::Fence(const Device& device, bool signaled)
     : m_device(device)
 {
@@ -218,13 +200,7 @@ void DescriptorSet::update()
     m_images.clear();
 }
 
-ShaderModule::ShaderModule(const Device& device)
-    : m_device(device)
-{
-    m_createinfo.module = VK_NULL_HANDLE;
-}
-
-void ShaderModule::load_from(const void* spv, size_t len)
+ShaderModule::ShaderModule(VkDevice device, const void* spv, size_t len)
 {
     VkResult res;
     SpvReflectResult rfs;
@@ -233,7 +209,7 @@ void ShaderModule::load_from(const void* spv, size_t len)
     createinfo.codeSize = len;
     createinfo.pCode = reinterpret_cast<const uint32_t*>(spv);
 
-    if ((res = vkCreateShaderModule(m_device, &createinfo, nullptr, &m_createinfo.module)) != VK_SUCCESS) {
+    if ((res = vkCreateShaderModule(device, &createinfo, nullptr, &m_createinfo.module)) != VK_SUCCESS) {
         spdlog::critical("vkCreateShaderModule: {}", res);
         abort();
     }
@@ -278,16 +254,78 @@ void ShaderModule::load_from(const void* spv, size_t len)
     }
 }
 
-void ShaderModule::load_from(fs::istream&& is)
+ShaderModule::ShaderModule(const ShaderModule& base, VkSpecializationInfo* specialization)
+    : m_createinfo(base.m_createinfo)
+    , m_descriptor_set_layout_info(base.m_descriptor_set_layout_info)
+    , m_push_constants(base.m_push_constants)
 {
-    std::vector<char> slurped(is.length());
-    is.read(slurped.data(), slurped.size());
-    load_from(slurped.data(), slurped.size());
+    m_createinfo.pSpecializationInfo = specialization;
 }
 
-ShaderModule::~ShaderModule()
+void ShaderModule::destroy(VkDevice device)
 {
-    vkDestroyShaderModule(m_device, m_createinfo.module, nullptr);
+    vkDestroyShaderModule(device, m_createinfo.module, nullptr);
+}
+
+ShaderFactory::shader_specialization_data::shader_specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
+    : entries(index)
+{
+    void* local_data = malloc(size);
+    memcpy(local_data, specialization, size);
+
+    info.mapEntryCount = entries.size();
+    info.pMapEntries = entries.data();
+    info.dataSize = size;
+    info.pData = local_data;
+}
+
+ShaderFactory::shader_specialization_data::~shader_specialization_data()
+{
+    free(const_cast<void*>(info.pData));
+}
+
+ShaderFactory::ShaderFactory(const Device& device)
+    : m_device(device)
+{
+}
+
+ShaderFactory::~ShaderFactory()
+{
+    clear(true);
+}
+
+void ShaderFactory::clear(bool all)
+{
+    m_specialized.clear();
+    m_specialized_data.clear();
+    if (all) {
+        for (auto& it : m_cache) {
+            it.second.destroy(m_device);
+        }
+        m_cache.clear();
+    }
+}
+
+ShaderModule& ShaderFactory::open(const fs::file& path)
+{
+    fs::istream is(path);
+    std::vector<char> slurped(is.length());
+    is.read(slurped.data(), slurped.size());
+
+    std::unordered_map<std::string, ShaderModule>::iterator location;
+    std::tie(location, std::ignore) = m_cache.emplace(path.path(), ShaderModule(m_device, slurped.data(), slurped.size()));
+    return location->second;
+}
+
+ShaderModule& ShaderFactory::specialize(const std::string& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
+{
+    auto& spec_data = m_specialized_data.emplace_back(specialization, size, std::move(index));
+    return m_specialized.emplace_back(ShaderModule(get(path), &spec_data.info));
+}
+
+const ShaderModule& ShaderFactory::get(const std::string& path) const
+{
+    return m_cache.at(path);
 }
 
 RenderPass::RenderPass(const Device& device)
@@ -551,11 +589,13 @@ Pipeline::~Pipeline()
     }
 }
 
-void Pipeline::set_layouts(const std::array<std::vector<VkDescriptorSetLayoutBinding>, DESCRIPTOR_SET_COUNT>& descriptor_layout_bindings,
+void Pipeline::set_layouts(uint32_t layout_count, const std::vector<VkDescriptorSetLayoutBinding>* descriptor_layout_bindings,
     const std::vector<VkPushConstantRange>& push_constants)
 {
     VkResult res;
-    for (int i = 0; i < DESCRIPTOR_SET_COUNT; i++) {
+
+    m_descriptor_set_layout.resize(layout_count);
+    for (int i = 0; i < m_descriptor_set_layout.size(); i++) {
         VkDescriptorSetLayoutCreateInfo ds_layout_createinfo {};
         ds_layout_createinfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         ds_layout_createinfo.pNext = nullptr;
@@ -570,7 +610,7 @@ void Pipeline::set_layouts(const std::array<std::vector<VkDescriptorSetLayoutBin
 
     VkPipelineLayoutCreateInfo layout_createinfo {};
     layout_createinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_createinfo.setLayoutCount = DESCRIPTOR_SET_COUNT;
+    layout_createinfo.setLayoutCount = layout_count;
     layout_createinfo.pSetLayouts = m_descriptor_set_layout.data();
     layout_createinfo.pushConstantRangeCount = push_constants.size();
     layout_createinfo.pPushConstantRanges = push_constants.data();
@@ -580,164 +620,320 @@ void Pipeline::set_layouts(const std::array<std::vector<VkDescriptorSetLayoutBin
     }
 }
 
-Pipeline::Builder::~Builder()
+std::string PipelineFactory::s_cache_path = "/pref/pipelinecache";
+std::vector<VkDynamicState> PipelineFactory::s_graphics_dynamic_states = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+VkPipelineDynamicStateCreateInfo PipelineFactory::s_graphics_dynamic_state = {
+    VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    nullptr,
+    0,
+    static_cast<uint32_t>(s_graphics_dynamic_states.size()),
+    s_graphics_dynamic_states.data(),
+};
+VkPipelineViewportStateCreateInfo PipelineFactory::s_viewport_state {
+    VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    nullptr,
+    0,
+    1,
+    &s_viewport_state_viewport,
+    1,
+    &s_viewport_state_scissor,
+};
+PipelineFactory::PipelineFactory(const Device& device, const ShaderFactory& shaders, size_t bucket_count)
+    : m_device(device)
+    , m_shaders(shaders)
+    , m_persistent_cache(VK_NULL_HANDLE)
+    , m_bucket_count(bucket_count)
+    , m_compute(bucket_count)
+    , m_graphics(bucket_count)
 {
+    fs::file cache_file(s_cache_path);
+    std::vector<char> cache_data;
+    if (cache_file.exists()) {
+        fs::istream cache_stream(cache_file);
+        cache_data.resize(cache_stream.length());
+        cache_stream.read(cache_data.data(), cache_data.size());
+    }
+
+    VkResult res;
+    VkPipelineCacheCreateInfo createinfo {};
+    createinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    createinfo.initialDataSize = cache_data.size();
+    createinfo.pInitialData = cache_data.data();
+    if ((res = vkCreatePipelineCache(m_device, &createinfo, nullptr, &m_persistent_cache)) != VK_SUCCESS) {
+        spdlog::critical("vkCreatePipelineCache: {}", res);
+        abort();
+    }
 }
 
-void Pipeline::Builder::add_shader(const ShaderModule& shader)
+PipelineFactory::~PipelineFactory()
 {
-    m_shaders.emplace_back(shader);
-    m_push_constants.insert(m_push_constants.end(), shader.push_constants().begin(), shader.push_constants().end());
+    m_compute.clear();
+    m_graphics.clear();
+    vkDestroyPipelineCache(m_device, m_persistent_cache, nullptr);
+}
+
+void PipelineFactory::write_cache() const
+{
+    VkResult res;
+    std::vector<char> cache_data;
+    size_t cache_size = 0;
+    if ((res = vkGetPipelineCacheData(m_device, m_persistent_cache, &cache_size, nullptr)) != VK_SUCCESS) {
+        spdlog::critical("vkGetPipelineCacheData(size): {}", res);
+        abort();
+    }
+    cache_data.resize(cache_size);
+    if ((res = vkGetPipelineCacheData(m_device, m_persistent_cache, &cache_size, cache_data.data())) != VK_SUCCESS) {
+        spdlog::critical("vkGetPipelineCacheData: {}", res);
+        abort();
+    }
+
+    fs::ostream cw(s_cache_path);
+    cw.write(cache_data.data(), cache_size);
+}
+
+size_t PipelineFactory::spec_bucket(const std::vector<std::string>& shaders)
+{
+    size_t h = 0;
+    for (const std::string& s : shaders) {
+        h = (h << 1) ^ std::hash<std::string>()(s);
+    }
+    return h % m_bucket_count;
+}
+
+Pipeline& PipelineFactory::get(const ComputePipelineSpecification& in_spec)
+{
+    auto& candidates = m_compute[spec_bucket(in_spec.m_shaders)];
+    for (auto& c : candidates) {
+        if (c.second == in_spec)
+            return c.first;
+    }
+
+    std::vector<std::vector<VkDescriptorSetLayoutBinding>> descriptor_layout_bindings(m_device.limits().maxBoundDescriptorSets);
+    uint32_t max_descriptor_set = 0;
+    auto& new_slot = candidates.emplace_back(Pipeline(m_device, VK_PIPELINE_BIND_POINT_COMPUTE), in_spec);
+    auto& shader = m_shaders.get(in_spec.m_shaders.front());
     for (auto& info : shader.descriptor_set_layout_info()) {
-        auto& bindings = m_descriptor_layout_bindings[info.set()];
+        max_descriptor_set = std::max(max_descriptor_set, info.set());
+        auto& bindings = descriptor_layout_bindings[info.set()];
         bindings.insert(bindings.end(), info.bindings().begin(), info.bindings().end());
     }
+    new_slot.first.set_layouts(max_descriptor_set + 1, descriptor_layout_bindings.data(), shader.push_constants());
+
+    VkResult res;
+    VkComputePipelineCreateInfo createinfo {};
+    createinfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    createinfo.stage = shader;
+    createinfo.layout = new_slot.first.layout();
+    if ((res = vkCreateComputePipelines(m_device, m_persistent_cache, 1, &createinfo, nullptr, &new_slot.first.m_handle)) != VK_SUCCESS) {
+        spdlog::critical("vkCreateComputePipelines: {}", res);
+        abort();
+    }
+    return new_slot.first;
 }
 
-void Pipeline::Builder::clear_shaders()
+Pipeline& PipelineFactory::get(const GraphicsPipelineSpecification& in_spec)
 {
-    m_shaders.clear();
-    m_push_constants.clear();
-    for (auto& bindings : m_descriptor_layout_bindings)
-        bindings.clear();
-}
-
-GraphicsPipeline::Builder::Builder(const Device& device)
-    : m_device(device)
-    , m_subpass(VK_NULL_HANDLE, 0)
-{
-    m_vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    m_input_assembly_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    m_tessellation_state.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-    m_rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    m_multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    m_depth_stencil_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    m_color_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    m_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-    m_rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
-    m_rasterization_state.lineWidth = 1.f;
-
-    m_multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    m_color_blend_state.logicOpEnable = false;
-}
-
-GraphicsPipeline::Builder& GraphicsPipeline::Builder::append_derivative()
-{
-    return m_derivatives.emplace_back(*this);
-}
-
-bool GraphicsPipeline::Builder::has_vertex_shader() const
-{
-    return std::any_of(m_shaders.begin(), m_shaders.end(), [](const VkPipelineShaderStageCreateInfo& shader) {
-        return shader.stage == VK_SHADER_STAGE_VERTEX_BIT;
-    });
-}
-
-void GraphicsPipeline::Builder::add_vertex_input_attribute(uint32_t binding, uint32_t location, VkFormat format, size_t offset)
-{
-    for (auto it = m_vertex_input_attributes.begin(); it != m_vertex_input_attributes.end(); ++it) {
-        if (it->location == location) {
-            it->binding = binding;
-            it->format = format;
-            it->offset = offset;
-            return;
-        }
+    const auto& shader_names = in_spec.m_shaders;
+    auto& candidates = m_graphics[spec_bucket(in_spec.m_shaders)];
+    for (auto& c : candidates) {
+        if (c.second == in_spec)
+            return c.first;
     }
 
-    VkVertexInputAttributeDescription attr;
+    std::vector<std::vector<VkDescriptorSetLayoutBinding>> descriptor_layout_bindings(m_device.limits().maxBoundDescriptorSets);
+    std::vector<VkPushConstantRange> push_constant_ranges;
+    std::vector<VkPipelineShaderStageCreateInfo> shader_stages;
+    uint32_t max_descriptor_set = 0;
+    auto& new_slot = candidates.emplace_back(Pipeline(m_device, VK_PIPELINE_BIND_POINT_GRAPHICS), in_spec);
+    for (const auto& shader_name : shader_names) {
+        auto& shader = m_shaders.get(shader_name);
+        for (auto& info : shader.descriptor_set_layout_info()) {
+            max_descriptor_set = std::max(max_descriptor_set, info.set());
+            auto& bindings = descriptor_layout_bindings[info.set()];
+            bindings.insert(bindings.end(), info.bindings().begin(), info.bindings().end());
+        }
+        push_constant_ranges.insert(push_constant_ranges.end(), shader.push_constants().begin(), shader.push_constants().end());
+        shader_stages.push_back(shader);
+    }
+    new_slot.first.set_layouts(max_descriptor_set + 1, descriptor_layout_bindings.data(), push_constant_ranges);
+
+    VkPipelineVertexInputStateCreateInfo vertex_input_state {};
+    vertex_input_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input_state.vertexBindingDescriptionCount = in_spec.m_vertex_input_bindings.size();
+    vertex_input_state.pVertexBindingDescriptions = in_spec.m_vertex_input_bindings.data();
+    vertex_input_state.vertexAttributeDescriptionCount = in_spec.m_vertex_input_attributes.size();
+    vertex_input_state.pVertexAttributeDescriptions = in_spec.m_vertex_input_attributes.data();
+    VkPipelineColorBlendStateCreateInfo color_blend_state;
+    memcpy(&color_blend_state, &in_spec.m_pod.color_blend_state, sizeof(VkPipelineColorBlendStateCreateInfo));
+    color_blend_state.attachmentCount = in_spec.m_color_blend_attachments.size();
+    color_blend_state.pAttachments = in_spec.m_color_blend_attachments.data();
+
+    VkResult res;
+    VkGraphicsPipelineCreateInfo createinfo {};
+    createinfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    createinfo.stageCount = shader_stages.size();
+    createinfo.pStages = shader_stages.data();
+    createinfo.pVertexInputState = &vertex_input_state;
+    createinfo.pInputAssemblyState = &in_spec.m_pod.input_assembly_state;
+    createinfo.pTessellationState = &in_spec.m_pod.tessellation_state;
+    createinfo.pViewportState = &s_viewport_state;
+    createinfo.pRasterizationState = &in_spec.m_pod.rasterization_state;
+    createinfo.pMultisampleState = &in_spec.m_pod.multisample_state;
+    createinfo.pDepthStencilState = &in_spec.m_pod.depth_stencil_state;
+    createinfo.pColorBlendState = &color_blend_state;
+    createinfo.pDynamicState = &s_graphics_dynamic_state;
+    createinfo.layout = new_slot.first.layout();
+    createinfo.renderPass = in_spec.m_pod.render_pass;
+    createinfo.subpass = in_spec.m_pod.subpass_index;
+    if ((res = vkCreateGraphicsPipelines(m_device, m_persistent_cache, 1, &createinfo, nullptr, &new_slot.first.m_handle)) != VK_SUCCESS) {
+        spdlog::critical("vkCreateGraphicsPipelines: {}", res);
+        abort();
+    }
+    return new_slot.first;
+}
+
+bool PipelineFactory::ComputePipelineSpecification::operator==(const ComputePipelineSpecification& other) const
+{
+    return m_shaders == other.m_shaders;
+}
+
+PipelineFactory::GraphicsPipelineSpecification::GraphicsPipelineSpecification(std::vector<std::string>&& shaders)
+    : m_shaders(shaders)
+{
+    memset(&m_pod, 0, sizeof(m_pod));
+    m_pod.input_assembly_state.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    m_pod.tessellation_state.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    m_pod.rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    m_pod.rasterization_state.lineWidth = 1.f;
+    m_pod.multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    m_pod.multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    m_pod.depth_stencil_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    m_pod.color_blend_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+}
+bool PipelineFactory::GraphicsPipelineSpecification::operator==(const GraphicsPipelineSpecification& other) const
+{
+    if (m_shaders != other.m_shaders)
+        return false;
+    if (memcmp(&m_pod, &other.m_pod, sizeof(m_pod)) != 0)
+        return false;
+    if (m_vertex_input_attributes.size() != other.m_vertex_input_attributes.size())
+        return false;
+    if (memcmp(m_vertex_input_attributes.data(), other.m_vertex_input_attributes.data(), m_vertex_input_attributes.size() * sizeof(VkVertexInputAttributeDescription)) != 0)
+        return false;
+    if (m_vertex_input_bindings.size() != other.m_vertex_input_bindings.size())
+        return false;
+    if (memcmp(m_vertex_input_bindings.data(), other.m_vertex_input_bindings.data(), m_vertex_input_bindings.size() * sizeof(VkVertexInputBindingDescription)) != 0)
+        return false;
+    if (m_color_blend_attachments.size() != other.m_color_blend_attachments.size())
+        return false;
+    if (memcmp(m_color_blend_attachments.data(), other.m_color_blend_attachments.data(), m_color_blend_attachments.size() * sizeof(VkPipelineColorBlendAttachmentState)) != 0)
+        return false;
+    return true;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_vertex_input_attribute(uint32_t location, uint32_t binding, VkFormat format, size_t offset)
+{
+    VkVertexInputAttributeDescription& attr = m_vertex_input_attributes.emplace_back();
     attr.location = location;
     attr.binding = binding;
     attr.format = format;
-    attr.offset = static_cast<uint32_t>(offset);
-    m_vertex_input_attributes.push_back(attr);
+    attr.offset = offset;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::add_vertex_input_binding(uint32_t binding, size_t stride, bool by_instance)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_vertex_input_binding(uint32_t binding, size_t stride, bool by_instance)
 {
-#ifndef NDEBUG
-    if (stride & 0x3)
-        spdlog::warn("GraphicsPipeline::Builder::add_vertex_input_binding: stride ({}) should be a multiple of 4", stride);
-#endif
-    if (binding >= m_vertex_input_bindings.size())
-        m_vertex_input_bindings.resize(binding + 1);
-    m_vertex_input_bindings[binding].binding = binding;
-    m_vertex_input_bindings[binding].stride = stride;
-    m_vertex_input_bindings[binding].inputRate = by_instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputBindingDescription& s = m_vertex_input_bindings.emplace_back();
+    s.binding = binding;
+    s.stride = stride;
+    s.inputRate = by_instance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_primitive_topology(VkPrimitiveTopology topology, bool enable_restart)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_primitive_topology(VkPrimitiveTopology topology, bool enable_restart)
 {
-    m_input_assembly_state.topology = topology;
-    m_input_assembly_state.primitiveRestartEnable = enable_restart;
+    m_pod.input_assembly_state.topology = topology;
+    m_pod.input_assembly_state.primitiveRestartEnable = enable_restart;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_depth_bias(bool enable, float constant_factor, float clamp, float slope_factor)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_tessellation_patch_control_points(uint32_t n_points)
 {
-    m_rasterization_state.depthBiasEnable = enable;
-    m_rasterization_state.depthBiasConstantFactor = constant_factor;
-    m_rasterization_state.depthBiasClamp = clamp;
-    m_rasterization_state.depthBiasSlopeFactor = slope_factor;
+    m_pod.tessellation_state.patchControlPoints = n_points;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_multisample_samples(int samples)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_depth_clamp(bool enable)
 {
-#ifdef NDEBUG
-    m_multisample_state.rasterizationSamples = static_cast<VkSampleCountFlagBits>(samples);
-#else
-    if (0 < samples && samples <= 64) {
-        if ((samples & (samples - 1)) == 0) { // is power of two
-            m_multisample_state.rasterizationSamples = static_cast<VkSampleCountFlagBits>(samples);
-        } else
-            spdlog::error("GraphicsPipeline::Builder::set_multisample_samples({}): invalid value", samples);
-    } else
-        spdlog::error("GraphicsPipeline::Builder::set_multisample_samples({}): invalid value", samples);
-#endif
+    m_pod.rasterization_state.depthClampEnable = enable;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_sample_shading(bool enable, float min_fraction)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_rasterizer_discard(bool enable)
+{
+    m_pod.rasterization_state.rasterizerDiscardEnable = enable;
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_polygon_mode(VkPolygonMode polygon_mode)
+{
+    m_pod.rasterization_state.polygonMode = polygon_mode;
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_cull_mode(VkCullModeFlagBits cull_mode)
+{
+    m_pod.rasterization_state.cullMode = cull_mode;
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_front_face(VkFrontFace front_face)
+{
+    m_pod.rasterization_state.frontFace = front_face;
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_depth_bias(bool enable, float constant_factor, float clamp, float slope_factor)
+{
+    m_pod.rasterization_state.depthBiasEnable = enable;
+    m_pod.rasterization_state.depthBiasConstantFactor = constant_factor;
+    m_pod.rasterization_state.depthBiasClamp = clamp;
+    m_pod.rasterization_state.depthBiasSlopeFactor = slope_factor;
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_multisample_samples(int samples)
+{
+    m_pod.multisample_state.rasterizationSamples = static_cast<VkSampleCountFlagBits>(samples);
+    return *this;
+}
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_sample_shading(bool enable, float min_fraction)
 {
     if (enable) {
-        m_multisample_state.sampleShadingEnable = true;
-        m_multisample_state.minSampleShading = min_fraction;
+        m_pod.multisample_state.sampleShadingEnable = true;
+        m_pod.multisample_state.minSampleShading = min_fraction;
     } else {
-        m_multisample_state.sampleShadingEnable = false;
+        m_pod.multisample_state.sampleShadingEnable = false;
     }
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_depth_test(bool enable, VkCompareOp compare_op)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_depth_test(bool enable, VkCompareOp compare_op)
 {
-    m_depth_stencil_state.depthTestEnable = enable;
-    m_depth_stencil_state.depthCompareOp = compare_op;
+    m_pod.depth_stencil_state.depthTestEnable = enable;
+    m_pod.depth_stencil_state.depthCompareOp = compare_op;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_depth_write(bool enable)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_depth_write(bool enable)
 {
-#ifndef NDEBUG
-    if (enable && m_depth_stencil_state.depthTestEnable == false) {
-        spdlog::warn("GraphicsPipeline::Builder::set_depth_write: depth test is currently disabled; this will have no effect");
-    }
-#endif
-    m_depth_stencil_state.depthWriteEnable = enable;
+    m_pod.depth_stencil_state.depthWriteEnable = enable;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_depth_bounds_test(bool enable, float min, float max)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_depth_bounds_test(bool enable, float min, float max)
 {
-    m_depth_stencil_state.depthBoundsTestEnable = enable;
-    m_depth_stencil_state.minDepthBounds = min;
-    m_depth_stencil_state.maxDepthBounds = max;
+
+    m_pod.depth_stencil_state.depthBoundsTestEnable = enable;
+    m_pod.depth_stencil_state.minDepthBounds = min;
+    m_pod.depth_stencil_state.maxDepthBounds = max;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_stencil_test(bool enable)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_stencil_test(bool enable)
 {
-    m_depth_stencil_state.stencilTestEnable = enable;
+    m_pod.depth_stencil_state.stencilTestEnable = enable;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_stencil_test_parameters(bool front_face, VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
-    uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_stencil_test_parameters(bool front_face, VkCompareOp compare_op,
+    VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op, uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value)
 {
-    auto& params = front_face ? m_depth_stencil_state.front : m_depth_stencil_state.back;
+    auto& params = front_face ? m_pod.depth_stencil_state.front : m_pod.depth_stencil_state.back;
     params.failOp = fail_op;
     params.passOp = pass_op;
     params.compareOp = compare_op;
@@ -745,9 +941,10 @@ void GraphicsPipeline::Builder::set_stencil_test_parameters(bool front_face, VkC
     params.compareMask = compare_mask;
     params.writeMask = write_mask;
     params.reference = ref_value;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_attachment_color_blend_info(size_t index, bool enabled, VkBlendOp blend_op, VkBlendFactor src_factor, VkBlendFactor dst_factor, VkColorComponentFlags color_write_mask)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_attachment_color_blend_info(size_t index, bool enabled,
+    VkBlendOp blend_op, VkBlendFactor src_factor, VkBlendFactor dst_factor, VkColorComponentFlags color_write_mask)
 {
     if (index >= m_color_blend_attachments.size())
         m_color_blend_attachments.resize(index + 1);
@@ -761,9 +958,10 @@ void GraphicsPipeline::Builder::set_attachment_color_blend_info(size_t index, bo
         att.colorWriteMask = color_write_mask | VK_COLOR_COMPONENT_A_BIT;
     else
         att.colorWriteMask = color_write_mask;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_attachment_alpha_blend_info(size_t index, VkBlendOp blend_op, VkBlendFactor src_factor, VkBlendFactor dst_factor, bool write_alpha)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_attachment_alpha_blend_info(size_t index, VkBlendOp blend_op,
+    VkBlendFactor src_factor, VkBlendFactor dst_factor, bool write_alpha)
 {
     if (index >= m_color_blend_attachments.size())
         m_color_blend_attachments.resize(index + 1);
@@ -776,80 +974,21 @@ void GraphicsPipeline::Builder::set_attachment_alpha_blend_info(size_t index, Vk
         att.colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
     else
         att.colorWriteMask &= (~VK_COLOR_COMPONENT_A_BIT);
+    return *this;
 }
-
-void GraphicsPipeline::Builder::set_color_blend_constants(float r, float g, float b, float a)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_color_blend_constants(float r, float g, float b, float a)
 {
-    m_color_blend_state.blendConstants[0] = r;
-    m_color_blend_state.blendConstants[1] = g;
-    m_color_blend_state.blendConstants[2] = b;
-    m_color_blend_state.blendConstants[3] = a;
+    m_pod.color_blend_state.blendConstants[0] = r;
+    m_pod.color_blend_state.blendConstants[1] = g;
+    m_pod.color_blend_state.blendConstants[2] = b;
+    m_pod.color_blend_state.blendConstants[3] = a;
+    return *this;
 }
-
-void GraphicsPipeline::Builder::assign_to_subpass(const RenderPass& pass, size_t subpass)
+PipelineFactory::GraphicsPipelineSpecification& PipelineFactory::GraphicsPipelineSpecification::set_render_pass(VkRenderPass render_pass, uint32_t subpass_index)
 {
-    m_subpass = std::make_pair(VkRenderPass(pass), static_cast<uint32_t>(subpass));
-}
-
-std::vector<GraphicsPipeline> GraphicsPipeline::Builder::build()
-{
-    VkResult res;
-    size_t current_index = 0;
-    std::vector<GraphicsPipeline> out_pipelines;
-    std::vector<VkGraphicsPipelineCreateInfo> create_infos;
-    std::queue<std::pair<GraphicsPipeline::Builder*, int32_t>> builders;
-    builders.push(std::make_pair(this, -1));
-
-    while (builders.empty() == false) {
-        GraphicsPipeline::Builder* b = builders.front().first;
-        out_pipelines.push_back(GraphicsPipeline(m_device));
-        create_infos.emplace_back();
-
-        b->m_vertex_input_state.vertexAttributeDescriptionCount = b->m_vertex_input_attributes.size();
-        b->m_vertex_input_state.vertexBindingDescriptionCount = b->m_vertex_input_bindings.size();
-        b->m_vertex_input_state.pVertexAttributeDescriptions = b->m_vertex_input_attributes.data();
-        b->m_vertex_input_state.pVertexBindingDescriptions = b->m_vertex_input_bindings.data();
-        b->m_color_blend_state.attachmentCount = b->m_color_blend_attachments.size();
-        b->m_color_blend_state.pAttachments = b->m_color_blend_attachments.data();
-
-        GraphicsPipeline& out = out_pipelines.back();
-        out.set_layouts(m_descriptor_layout_bindings, m_push_constants);
-
-        VkGraphicsPipelineCreateInfo& createinfo = create_infos.back();
-        createinfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        createinfo.stageCount = b->m_shaders.size();
-        createinfo.pStages = b->m_shaders.data();
-        createinfo.pVertexInputState = &b->m_vertex_input_state;
-        createinfo.pInputAssemblyState = &b->m_input_assembly_state;
-        createinfo.pTessellationState = &b->m_tessellation_state;
-        createinfo.pViewportState = &b->s_viewport_state;
-        createinfo.pRasterizationState = &b->m_rasterization_state;
-        createinfo.pMultisampleState = &b->m_multisample_state;
-        createinfo.pDepthStencilState = &b->m_depth_stencil_state;
-        createinfo.pColorBlendState = &b->m_color_blend_state;
-        createinfo.pDynamicState = &b->s_dynamic_state;
-        createinfo.layout = out.m_layout;
-        createinfo.renderPass = b->m_subpass.first;
-        createinfo.subpass = b->m_subpass.second;
-        createinfo.basePipelineHandle = VK_NULL_HANDLE;
-        createinfo.basePipelineIndex = builders.front().second;
-
-        builders.pop();
-        for (auto& child : b->m_derivatives) {
-            builders.push(std::make_pair(&child, current_index));
-        }
-        current_index++;
-    }
-
-    std::vector<VkPipeline> out_handles(create_infos.size());
-    if ((res = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, create_infos.size(), create_infos.data(), nullptr, out_handles.data())) != VK_SUCCESS) {
-        spdlog::critical("vkCreateGraphicsPipelines: {}", res);
-        abort();
-    }
-    for (int i = 0; i < out_handles.size(); i++)
-        out_pipelines[i].m_handle = out_handles[i];
-
-    return out_pipelines;
+    m_pod.render_pass = render_pass;
+    m_pod.subpass_index = subpass_index;
+    return *this;
 }
 
 Sampler::Builder::Builder()

@@ -261,10 +261,20 @@ void init(const char* argv0)
 #ifdef NDEBUG
 #else // NDEBUG
     if (PHYSFS_mount(SOURCE_ROOT "/resources", "/rs", 1) == 0) {
-        spdlog::critical("PHYSFS_init: {}", PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+        spdlog::critical("PHYSFS_mount({}): {}", SOURCE_ROOT "/resources", PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
         abort();
     }
 #endif // NDEBUG
+
+    const char* prefdir = PHYSFS_getPrefDir("tez011", "vulkan");
+    if (PHYSFS_mount(prefdir, "/pref", 1) == 0) {
+        spdlog::critical("PHYSFS_mount({}): {}", SOURCE_ROOT "/resources", PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+        abort();
+    }
+    if (PHYSFS_setWriteDir(prefdir) == 0) {
+        spdlog::critical("PHYSFS_setWriteDir({}): {}", prefdir, PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
+        abort();
+    }
 
     atexit([]() { PHYSFS_deinit(); });
     s_initted = true;

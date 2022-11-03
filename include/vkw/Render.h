@@ -2,12 +2,16 @@
 #include "Allocator.h"
 #include "Device.h"
 #include "Vkresource.h"
-#include "fs.h"
 #include "spirv_reflect.h"
 #include <array>
 #include <list>
+#include <unordered_map>
 #include <vector>
 #include <vulkan/vulkan.h>
+
+namespace fs {
+class file;
+}
 
 namespace vkw {
 template <unsigned int N>
@@ -134,30 +138,55 @@ public:
     void update();
 };
 
+// TODO: Could this be a private member of ShaderFactory?
 class ShaderModule {
 private:
-    VkDevice m_device;
     VkPipelineShaderStageCreateInfo m_createinfo {};
-
     std::vector<DescriptorSetLayoutInfo> m_descriptor_set_layout_info;
     std::vector<VkPushConstantRange> m_push_constants;
 
-    void load_from(const void* spv, size_t len);
+    ShaderModule(VkDevice device, const void* spv, size_t len);
+    ShaderModule(const ShaderModule& base, VkSpecializationInfo* specialization);
+    void destroy(VkDevice device);
+
+    friend class ShaderFactory;
 
 public:
-    ShaderModule(const Device& device);
-    ~ShaderModule();
-    void load_from(fs::istream&&);
-    inline void set_specialization_info(VkSpecializationInfo* specialization)
-    {
-        m_createinfo.pSpecializationInfo = specialization;
-    }
+    ShaderModule(const ShaderModule&) = default;
+    ShaderModule(ShaderModule&&) = default;
 
     inline operator VkPipelineShaderStageCreateInfo() const { return m_createinfo; }
     inline operator VkShaderModule() const { return m_createinfo.module; }
     inline VkShaderStageFlags stage() const { return m_createinfo.stage; }
     inline const std::vector<VkPushConstantRange>& push_constants() const { return m_push_constants; }
     inline const std::vector<DescriptorSetLayoutInfo>& descriptor_set_layout_info() const { return m_descriptor_set_layout_info; }
+};
+
+// TODO: Fold into Device class?
+class ShaderFactory {
+private:
+    struct shader_specialization_data {
+        VkSpecializationInfo info;
+        std::vector<VkSpecializationMapEntry> entries;
+
+        shader_specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
+        ~shader_specialization_data();
+    };
+
+    VkDevice m_device;
+    std::unordered_map<std::string, ShaderModule> m_cache;
+    std::vector<ShaderModule> m_specialized;
+    std::vector<shader_specialization_data> m_specialized_data;
+
+public:
+    ShaderFactory(const Device&);
+    ShaderFactory(const ShaderFactory&) = delete;
+    ~ShaderFactory();
+    void clear(bool all = false);
+
+    ShaderModule& open(const fs::file& path);
+    ShaderModule& specialize(const std::string& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
+    const ShaderModule& get(const std::string& path) const;
 };
 
 class RenderPass;
@@ -320,130 +349,145 @@ public:
 };
 
 class Pipeline {
-protected:
-    std::array<VkDescriptorSetLayout, DESCRIPTOR_SET_COUNT> m_descriptor_set_layout;
+private:
     VkDevice m_device;
+    VkPipelineBindPoint m_bind_point;
+    std::vector<VkDescriptorSetLayout> m_descriptor_set_layout;
     VkPipelineLayout m_layout;
     VkPipeline m_handle;
 
-    Pipeline(const Device& device)
-        : m_descriptor_set_layout()
-        , m_device(device)
+    Pipeline(VkDevice device, VkPipelineBindPoint bind_point)
+        : m_device(device)
+        , m_bind_point(bind_point)
         , m_layout(VK_NULL_HANDLE)
         , m_handle(VK_NULL_HANDLE)
     {
     }
-    void set_layouts(const std::array<std::vector<VkDescriptorSetLayoutBinding>, DESCRIPTOR_SET_COUNT>&, const std::vector<VkPushConstantRange>&);
+    void set_layouts(uint32_t layout_count, const std::vector<VkDescriptorSetLayoutBinding>* descriptor_layout_bindings, const std::vector<VkPushConstantRange>& push_constant_ranges);
+
+    friend class PipelineFactory;
 
 public:
-    virtual ~Pipeline();
-    virtual VkPipelineBindPoint bind_point() const = 0;
+    Pipeline(const Pipeline&) = delete;
+    Pipeline(Pipeline&&) = default;
+    ~Pipeline();
+    inline VkPipelineBindPoint bind_point() const { return m_bind_point; }
     inline VkPipelineLayout layout() const { return m_layout; }
     inline const VkDescriptorSetLayout& descriptor_set_layout(int i) { return m_descriptor_set_layout[i]; }
     inline operator VkPipeline() const { return m_handle; }
-
-    class Builder {
-    protected:
-        std::vector<VkPipelineShaderStageCreateInfo> m_shaders;
-        std::array<std::vector<VkDescriptorSetLayoutBinding>, DESCRIPTOR_SET_COUNT> m_descriptor_layout_bindings;
-        std::vector<VkPushConstantRange> m_push_constants;
-
-    public:
-        Builder() { }
-        Builder(const Builder&) = default;
-        virtual ~Builder() = 0;
-
-        void add_shader(const ShaderModule& shader);
-        inline void clear_shaders();
-    };
 };
 
-class GraphicsPipeline : public Pipeline {
+class PipelineFactory {
 public:
-    GraphicsPipeline(const Device& device)
-        : Pipeline(device)
-    {
-    }
-    VkPipelineBindPoint bind_point() const { return VK_PIPELINE_BIND_POINT_GRAPHICS; }
-
-    class Builder : public Pipeline::Builder {
+    class ComputePipelineSpecification {
     private:
-        const Device& m_device;
-        VkPipelineVertexInputStateCreateInfo m_vertex_input_state {};
-        std::vector<VkVertexInputAttributeDescription> m_vertex_input_attributes;
-        std::vector<VkVertexInputBindingDescription> m_vertex_input_bindings;
+        std::vector<std::string> m_shaders;
 
-        static std::vector<VkDynamicState> s_dynamic_states;
-        static constexpr VkViewport s_viewport_state_viewport {};
-        static constexpr VkRect2D s_viewport_state_scissor {};
-        static VkPipelineDynamicStateCreateInfo s_dynamic_state;
-        static VkPipelineViewportStateCreateInfo s_viewport_state;
-
-        VkPipelineColorBlendStateCreateInfo m_color_blend_state {};
-        std::vector<VkPipelineColorBlendAttachmentState> m_color_blend_attachments;
-
-        VkPipelineInputAssemblyStateCreateInfo m_input_assembly_state {};
-        VkPipelineTessellationStateCreateInfo m_tessellation_state {};
-        VkPipelineRasterizationStateCreateInfo m_rasterization_state {};
-        VkPipelineMultisampleStateCreateInfo m_multisample_state {};
-        VkPipelineDepthStencilStateCreateInfo m_depth_stencil_state {};
-        VkPipelineLayoutCreateInfo m_layout_create_info {};
-        std::pair<VkRenderPass, uint32_t> m_subpass;
-
-        std::vector<Builder> m_derivatives;
-
-        bool has_vertex_shader() const;
-        void set_stencil_test_parameters(bool front_face, VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
-            uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value);
+        friend class PipelineFactory;
 
     public:
-        Builder(const Device& device);
-        Builder(const Builder&) = default;
-        Builder& append_derivative();
+        ComputePipelineSpecification(std::vector<std::string>&& shaders)
+            : m_shaders(shaders)
+        {
+        }
 
-        void add_vertex_input_attribute(uint32_t binding, uint32_t location, VkFormat format, size_t offset);
-        void clear_vertex_input_attributes() { m_vertex_input_attributes.clear(); };
-        void add_vertex_input_binding(uint32_t binding, size_t stride, bool by_instance = false);
-        void clear_vertex_input_bindings() { m_vertex_input_bindings.clear(); }
-        void set_primitive_topology(VkPrimitiveTopology topology, bool enable_restart = false);
-        void set_tessellation_patch_control_points(uint32_t n_points) { m_tessellation_state.patchControlPoints = n_points; }
-        void set_depth_clamp(bool enable) { m_rasterization_state.depthClampEnable = enable; }
-        void set_rasterizer_discard(bool enable) { m_rasterization_state.rasterizerDiscardEnable = enable; }
-        void set_polygon_mode(VkPolygonMode polygon_mode) { m_rasterization_state.polygonMode = polygon_mode; }
-        void set_cull_mode(VkCullModeFlagBits cull_mode) { m_rasterization_state.cullMode = cull_mode; }
-        void set_front_face(VkFrontFace front_face) { m_rasterization_state.frontFace = front_face; }
-        void set_depth_bias(bool enable, float constant_factor, float clamp, float slope_factor);
-        void set_multisample_samples(int samples);
-        void set_sample_shading(bool enable, float min_fraction = 1.f);
-        void set_depth_test(bool enable, VkCompareOp compare_op = VK_COMPARE_OP_NEVER);
-        void set_depth_write(bool enable);
-        void set_depth_bounds_test(bool enable, float min = 0.f, float max = 0.f);
-        void set_stencil_test(bool enable);
-        inline void set_stencil_test_front_face_parameters(VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
+        bool operator==(const ComputePipelineSpecification& other) const;
+    };
+
+    class GraphicsPipelineSpecification {
+    private:
+        std::vector<std::string> m_shaders;
+        struct {
+            VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
+            VkPipelineTessellationStateCreateInfo tessellation_state;
+            VkPipelineRasterizationStateCreateInfo rasterization_state;
+            VkPipelineMultisampleStateCreateInfo multisample_state;
+            VkPipelineDepthStencilStateCreateInfo depth_stencil_state;
+            VkPipelineColorBlendStateCreateInfo color_blend_state;
+            VkRenderPass render_pass;
+            uint32_t subpass_index;
+        } m_pod;
+
+        std::vector<VkVertexInputAttributeDescription> m_vertex_input_attributes;
+        std::vector<VkVertexInputBindingDescription> m_vertex_input_bindings;
+        std::vector<VkPipelineColorBlendAttachmentState> m_color_blend_attachments;
+
+        GraphicsPipelineSpecification& set_stencil_test_parameters(bool front_face, VkCompareOp compare_op,
+            VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
+            uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value);
+
+        friend class PipelineFactory;
+
+    public:
+        GraphicsPipelineSpecification(std::vector<std::string>&& shaders);
+        bool operator==(const GraphicsPipelineSpecification& other) const;
+
+        GraphicsPipelineSpecification& set_vertex_input_attribute(uint32_t location, uint32_t binding, VkFormat format, size_t offset);
+        GraphicsPipelineSpecification& set_vertex_input_binding(uint32_t binding, size_t stride, bool by_instance = false);
+        GraphicsPipelineSpecification& set_primitive_topology(VkPrimitiveTopology topology, bool enable_restart = false);
+        GraphicsPipelineSpecification& set_tessellation_patch_control_points(uint32_t n_points);
+        GraphicsPipelineSpecification& set_depth_clamp(bool enable);
+        GraphicsPipelineSpecification& set_rasterizer_discard(bool enable);
+        GraphicsPipelineSpecification& set_polygon_mode(VkPolygonMode polygon_mode);
+        GraphicsPipelineSpecification& set_cull_mode(VkCullModeFlagBits cull_mode);
+        GraphicsPipelineSpecification& set_front_face(VkFrontFace front_face);
+        GraphicsPipelineSpecification& set_depth_bias(bool enable, float constant_factor, float clamp, float slope_factor);
+        GraphicsPipelineSpecification& set_multisample_samples(int samples);
+        GraphicsPipelineSpecification& set_sample_shading(bool enable, float min_fraction = 1.f);
+        GraphicsPipelineSpecification& set_depth_test(bool enable, VkCompareOp compare_op = VK_COMPARE_OP_NEVER);
+        GraphicsPipelineSpecification& set_depth_write(bool enable);
+        GraphicsPipelineSpecification& set_depth_bounds_test(bool enable, float min = 0.f, float max = 0.f);
+        GraphicsPipelineSpecification& set_stencil_test(bool enable);
+        inline GraphicsPipelineSpecification& set_stencil_test_front_face_parameters(VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
             uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value)
         {
-            set_stencil_test_parameters(true, compare_op, pass_op, fail_op, depth_fail_op, compare_mask, write_mask, ref_value);
+            return set_stencil_test_parameters(true, compare_op, pass_op, fail_op, depth_fail_op, compare_mask, write_mask, ref_value);
         }
-        void set_stencil_test_back_face_parameters(VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
+        inline GraphicsPipelineSpecification& set_stencil_test_back_face_parameters(VkCompareOp compare_op, VkStencilOp pass_op, VkStencilOp fail_op, VkStencilOp depth_fail_op,
             uint32_t compare_mask, uint32_t write_mask, uint32_t ref_value)
         {
-            set_stencil_test_parameters(false, compare_op, pass_op, fail_op, depth_fail_op, compare_mask, write_mask, ref_value);
+            return set_stencil_test_parameters(false, compare_op, pass_op, fail_op, depth_fail_op, compare_mask, write_mask, ref_value);
         }
-        inline void clear_attachments_color_blend_info() { m_color_blend_attachments.clear(); }
-        void set_attachment_color_blend_info(size_t index, bool enabled,
+        GraphicsPipelineSpecification& set_attachment_color_blend_info(size_t index, bool enabled,
             VkBlendOp blend_op = VK_BLEND_OP_ADD,
             VkBlendFactor src_factor = VK_BLEND_FACTOR_ZERO,
             VkBlendFactor dst_factor = VK_BLEND_FACTOR_ZERO,
             VkColorComponentFlags color_write_mask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT);
-        void set_attachment_alpha_blend_info(size_t index, VkBlendOp blend_op = VK_BLEND_OP_ADD,
+        GraphicsPipelineSpecification& set_attachment_alpha_blend_info(size_t index, VkBlendOp blend_op = VK_BLEND_OP_ADD,
             VkBlendFactor src_factor = VK_BLEND_FACTOR_ZERO,
             VkBlendFactor dst_factor = VK_BLEND_FACTOR_ZERO,
             bool write_alpha = true);
-        void set_color_blend_constants(float r, float g, float b, float a);
-        void assign_to_subpass(const RenderPass& pass, size_t subpass);
-
-        std::vector<GraphicsPipeline> build();
+        GraphicsPipelineSpecification& set_color_blend_constants(float r, float g, float b, float a);
+        GraphicsPipelineSpecification& set_render_pass(VkRenderPass render_pass, uint32_t subpass_index);
     };
+
+private:
+    static std::string s_cache_path;
+    static std::vector<VkDynamicState> s_graphics_dynamic_states;
+    static VkPipelineDynamicStateCreateInfo s_graphics_dynamic_state;
+    static VkPipelineViewportStateCreateInfo s_viewport_state;
+    static constexpr VkViewport s_viewport_state_viewport {};
+    static constexpr VkRect2D s_viewport_state_scissor {};
+
+    const Device& m_device;
+    const ShaderFactory& m_shaders;
+    VkPipelineCache m_persistent_cache;
+
+    size_t m_bucket_count;
+    std::vector<std::vector<std::pair<Pipeline, ComputePipelineSpecification>>> m_compute;
+    std::vector<std::vector<std::pair<Pipeline, GraphicsPipelineSpecification>>> m_graphics;
+    // Top level: hash(shaders), then memcmp pod, then compare vectors
+
+    size_t spec_bucket(const std::vector<std::string>& shaders);
+
+public:
+    PipelineFactory(const Device&, const ShaderFactory&, size_t bucket_count = 16);
+    PipelineFactory(const PipelineFactory&) = delete;
+    ~PipelineFactory();
+
+    void write_cache() const;
+    Pipeline& get(const ComputePipelineSpecification&);
+    Pipeline& get(const GraphicsPipelineSpecification&);
 };
 
 class CommandPool {
@@ -505,7 +549,7 @@ public:
     }
     void bind_descriptor_set(uint32_t set_number, VkDescriptorSet handle);
     void bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
-    void bind_pipeline(const Pipeline&);
+    void bind_pipeline(const Pipeline& pipeline);
     void bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize offset);
     void set_image_layout(VkImage image, VkImageLayout from, VkImageLayout to, VkImageSubresourceRange& subresource, VkPipelineStageFlags src_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkPipelineStageFlags dst_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     void set_viewport(float x, float y, float width, float height, float min_depth, float max_depth);

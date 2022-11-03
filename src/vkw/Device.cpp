@@ -337,6 +337,7 @@ void Device::create_logical_device()
     VkPhysicalDeviceProperties properties {};
     vkGetPhysicalDeviceProperties(m_hwd, &properties);
     spdlog::info("selecting device {}", properties.deviceName);
+    memcpy(&m_device_limits, &properties.limits, sizeof(VkPhysicalDeviceLimits));
 
     VkPhysicalDeviceVulkan12Features available_features12 {};
     available_features12.sType = m_device_features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
