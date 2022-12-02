@@ -145,6 +145,15 @@ void CommandBuffer::bind_descriptor_set(uint32_t set_number, VkDescriptorSet han
     vkCmdBindDescriptorSets(*this, m_bound_pipeline_bind_point, m_bound_pipeline_layout, set_number, 1, &handle, 0, nullptr);
 }
 
+void CommandBuffer::bind_descriptor_sets(size_t count, vkw::DescriptorSet* descriptor_sets)
+{
+    std::vector<VkDescriptorSet> handles(count);
+    for (size_t i = 0; i < count; i++)
+        handles[i] = descriptor_sets[i];
+
+    vkCmdBindDescriptorSets(*this, m_bound_pipeline_bind_point, m_bound_pipeline_layout, 0, handles.size(), handles.data(), 0, nullptr);
+}
+
 void CommandBuffer::bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type)
 {
     vkCmdBindIndexBuffer(*this, buffer, offset, type);
@@ -155,6 +164,11 @@ void CommandBuffer::bind_pipeline(const Pipeline& pipeline)
     m_bound_pipeline_bind_point = pipeline.bind_point();
     m_bound_pipeline_layout = pipeline.layout();
     vkCmdBindPipeline(*this, pipeline.bind_point(), pipeline);
+}
+
+void CommandBuffer::push_constants(VkShaderStageFlags stage, uint32_t offset, uint32_t size, const void* data)
+{
+    vkCmdPushConstants(*this, m_bound_pipeline_layout, stage, offset, size, data);
 }
 
 void CommandBuffer::bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize offset)

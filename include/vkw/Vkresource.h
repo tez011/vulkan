@@ -81,6 +81,7 @@ public:
     inline const Allocation<N>& allocation() const { return m_allocation; }
 
     void copy_from(Buffer& src_buffer, CommandBuffer& cmd, VkDeviceSize src_offset = 0);
+    void destroy();
 };
 
 template <unsigned int N>
@@ -150,7 +151,7 @@ public:
     Image(Allocator& allocator);
     Image(Allocator& allocator, MemoryUsage mem_usage, VkImageType type, VkImageUsageFlags usage, const VkExtent3D& extent, VkFormat format, int samples, int mip_levels, int layers,
         VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL, const std::initializer_list<QueueFamilyType>& queue_families = {}, VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED, VkImageCreateFlags flags = 0);
-    Image(HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL, const std::initializer_list<QueueFamilyType>& queue_families = {}, VkImageCreateFlags flags = 0);
+    Image(Allocator& allocator, HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL, const std::initializer_list<QueueFamilyType>& queue_families = {}, VkImageCreateFlags flags = 0);
     Image(const Image&) = delete;
     Image(Image&&) = default;
     ~Image();
@@ -186,6 +187,8 @@ public:
     {
         m_handle.fill(VK_NULL_HANDLE);
     }
+    ImageView(const Device& device, Image<N>& src_image, VkImageViewType type, VkFormat format, VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, const std::array<uint32_t, 2>& array_layers = { 0, 0 }, const std::array<uint32_t, 2>& mip_levels = { 0, 0 });
+
     void create(Image<N>& src_image, VkImageViewType type, VkFormat format, VkImageAspectFlags aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT, const std::array<uint32_t, 2>& array_layers = { 0, 0 }, const std::array<uint32_t, 2>& mip_levels = { 0, 0 });
     ~ImageView();
 

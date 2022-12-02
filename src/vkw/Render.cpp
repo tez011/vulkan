@@ -133,6 +133,32 @@ void DescriptorPool::append_next_pool()
     }
 }
 
+std::vector<DescriptorSet> DescriptorPool::allocate(const Pipeline& pipeline)
+{
+    VkResult res;
+    size_t descriptor_set_count = pipeline.descriptor_set_count();
+    std::vector<VkDescriptorSetLayout> layouts(2 * descriptor_set_count);
+    std::vector<VkDescriptorSet> out(2 * descriptor_set_count);
+    for (size_t i = 0; i < descriptor_set_count; i++)
+        layouts[2 * i] = layouts[2 * i + 1] = pipeline.descriptor_set_layout(i);
+
+    VkDescriptorSetAllocateInfo allocinfo {};
+    allocinfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocinfo.pSetLayouts = layouts.data();
+    allocinfo.descriptorPool = *m_current;
+    allocinfo.descriptorSetCount = 2 * descriptor_set_count;
+    if ((res = vkAllocateDescriptorSets(m_device, &allocinfo, out.data())) != VK_SUCCESS) {
+        spdlog::critical("vkAllocateDescriptorSets: {}", res);
+        abort();
+    }
+
+    std::vector<DescriptorSet> ret;
+    ret.reserve(descriptor_set_count);
+    for (size_t i = 0; i < descriptor_set_count; i++)
+        ret.push_back(DescriptorSet(m_device, out[2 * i], out[2 * i + 1]));
+    return ret;
+}
+
 DescriptorSet DescriptorPool::allocate(VkDescriptorSetLayout layout)
 {
     VkResult res;
@@ -147,7 +173,7 @@ DescriptorSet DescriptorPool::allocate(VkDescriptorSetLayout layout)
         spdlog::critical("vkAllocateDescriptorSets: {}", res);
         abort();
     }
-    return DescriptorSet(m_device, out);
+    return DescriptorSet(m_device, out[0], out[1]);
 }
 
 void DescriptorPool::reset()
@@ -175,12 +201,18 @@ void DescriptorSet::bind_buffer(uint32_t binding, VkDescriptorType type, const B
     write.pBufferInfo = &buf;
 }
 
-void DescriptorSet::bind_image(uint32_t binding, VkDescriptorType type, const ImageView<1>& image, VkImageLayout layout, const Sampler& sampler)
+void DescriptorSet::bind_image(uint32_t binding, VkDescriptorType type, const ImageView<1>& image, VkImageLayout layout, VkSampler sampler)
 {
     auto& img = m_images.emplace_back();
     img.imageView = image;
     img.imageLayout = layout;
-    img.sampler = sampler;
+    img.sampler = sampler ? sampler : m_active_sampler;
+#ifndef NDEBUG
+    if (img.sampler == VK_NULL_HANDLE) {
+        spdlog::critical("DescriptorSet::bind_image: no sampler was bound, so one must be specified");
+        abort();
+    }
+#endif
 
     auto& write = m_writes.emplace_back();
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -200,7 +232,50 @@ void DescriptorSet::update()
     m_images.clear();
 }
 
-ShaderModule::ShaderModule(VkDevice device, const void* spv, size_t len)
+ShaderFactory::~ShaderFactory()
+{
+    for (module& sh : m_shaders)
+        vkDestroyShaderModule(m_device, sh.m_createinfo.module, nullptr);
+}
+
+Shader ShaderFactory::open(const fs::file& path)
+{
+    auto it = m_cache.find(path.path());
+    if (it == m_cache.end()) {
+        fs::istream is(path);
+        std::vector<char> slurped(is.length());
+        is.read(slurped.data(), slurped.size());
+
+        Shader ret = m_shaders.size();
+        m_shaders.emplace_back(m_device, slurped.data(), slurped.size(), nullptr);
+        m_cache[path.path()] = ret;
+        return ret;
+    } else {
+        return it->second;
+    }
+}
+
+Shader ShaderFactory::open(const fs::file& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
+{
+    auto& spec_data = m_specialization_data.emplace_back(specialization, size, std::move(index));
+    auto it = m_cache.find(path.path());
+    if (it == m_cache.end()) {
+        fs::istream is(path);
+        std::vector<char> slurped(is.length());
+        is.read(slurped.data(), slurped.size());
+
+        Shader ret = m_shaders.size();
+        m_shaders.emplace_back(m_device, slurped.data(), slurped.size(), &spec_data.info);
+        m_cache[path.path()] = ret;
+        return ret;
+    } else {
+        auto& specialized_shader = m_shaders.emplace_back(m_shaders[it->second]);
+        specialized_shader.m_createinfo.pSpecializationInfo = &spec_data.info;
+        return m_shaders.size() - 1;
+    }
+}
+
+ShaderFactory::module::module(VkDevice device, const void* spv, size_t len, VkSpecializationInfo* specialization)
 {
     VkResult res;
     SpvReflectResult rfs;
@@ -224,6 +299,7 @@ ShaderModule::ShaderModule(VkDevice device, const void* spv, size_t len)
     m_createinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     m_createinfo.pName = "main";
     m_createinfo.stage = static_cast<VkShaderStageFlagBits>(reflect.shader_stage);
+    m_createinfo.pSpecializationInfo = specialization;
     if ((rfs = spvReflectEnumerateDescriptorSets(&reflect, &n, nullptr)) != SPV_REFLECT_RESULT_SUCCESS) {
         spdlog::critical("spvReflectEnumerateDescriptorSets: {}", rfs);
         abort();
@@ -254,78 +330,16 @@ ShaderModule::ShaderModule(VkDevice device, const void* spv, size_t len)
     }
 }
 
-ShaderModule::ShaderModule(const ShaderModule& base, VkSpecializationInfo* specialization)
-    : m_createinfo(base.m_createinfo)
-    , m_descriptor_set_layout_info(base.m_descriptor_set_layout_info)
-    , m_push_constants(base.m_push_constants)
+ShaderFactory::specialization_data::specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
+    : specdata(new char[size])
+    , entries(index)
 {
-    m_createinfo.pSpecializationInfo = specialization;
-}
-
-void ShaderModule::destroy(VkDevice device)
-{
-    vkDestroyShaderModule(device, m_createinfo.module, nullptr);
-}
-
-ShaderFactory::shader_specialization_data::shader_specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
-    : entries(index)
-{
-    void* local_data = malloc(size);
-    memcpy(local_data, specialization, size);
+    memcpy(specdata.get(), specialization, size);
 
     info.mapEntryCount = entries.size();
     info.pMapEntries = entries.data();
     info.dataSize = size;
-    info.pData = local_data;
-}
-
-ShaderFactory::shader_specialization_data::~shader_specialization_data()
-{
-    free(const_cast<void*>(info.pData));
-}
-
-ShaderFactory::ShaderFactory(const Device& device)
-    : m_device(device)
-{
-}
-
-ShaderFactory::~ShaderFactory()
-{
-    clear(true);
-}
-
-void ShaderFactory::clear(bool all)
-{
-    m_specialized.clear();
-    m_specialized_data.clear();
-    if (all) {
-        for (auto& it : m_cache) {
-            it.second.destroy(m_device);
-        }
-        m_cache.clear();
-    }
-}
-
-ShaderModule& ShaderFactory::open(const fs::file& path)
-{
-    fs::istream is(path);
-    std::vector<char> slurped(is.length());
-    is.read(slurped.data(), slurped.size());
-
-    std::unordered_map<std::string, ShaderModule>::iterator location;
-    std::tie(location, std::ignore) = m_cache.emplace(path.path(), ShaderModule(m_device, slurped.data(), slurped.size()));
-    return location->second;
-}
-
-ShaderModule& ShaderFactory::specialize(const std::string& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index)
-{
-    auto& spec_data = m_specialized_data.emplace_back(specialization, size, std::move(index));
-    return m_specialized.emplace_back(ShaderModule(get(path), &spec_data.info));
-}
-
-const ShaderModule& ShaderFactory::get(const std::string& path) const
-{
-    return m_cache.at(path);
+    info.pData = specdata.get();
 }
 
 RenderPass::RenderPass(const Device& device)
@@ -691,11 +705,11 @@ void PipelineFactory::write_cache() const
     cw.write(cache_data.data(), cache_size);
 }
 
-size_t PipelineFactory::spec_bucket(const std::vector<std::string>& shaders)
+size_t PipelineFactory::spec_bucket(const std::vector<Shader>& shaders)
 {
     size_t h = 0;
-    for (const std::string& s : shaders) {
-        h = (h << 1) ^ std::hash<std::string>()(s);
+    for (const Shader& s : shaders) {
+        h = (h << 1) ^ s;
     }
     return h % m_bucket_count;
 }
@@ -722,7 +736,7 @@ Pipeline& PipelineFactory::get(const ComputePipelineSpecification& in_spec)
     VkResult res;
     VkComputePipelineCreateInfo createinfo {};
     createinfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    createinfo.stage = shader;
+    createinfo.stage = shader.stage();
     createinfo.layout = new_slot.first.layout();
     if ((res = vkCreateComputePipelines(m_device, m_persistent_cache, 1, &createinfo, nullptr, &new_slot.first.m_handle)) != VK_SUCCESS) {
         spdlog::critical("vkCreateComputePipelines: {}", res);
@@ -753,7 +767,7 @@ Pipeline& PipelineFactory::get(const GraphicsPipelineSpecification& in_spec)
             bindings.insert(bindings.end(), info.bindings().begin(), info.bindings().end());
         }
         push_constant_ranges.insert(push_constant_ranges.end(), shader.push_constants().begin(), shader.push_constants().end());
-        shader_stages.push_back(shader);
+        shader_stages.push_back(shader.stage());
     }
     new_slot.first.set_layouts(max_descriptor_set + 1, descriptor_layout_bindings.data(), push_constant_ranges);
 
@@ -797,7 +811,7 @@ bool PipelineFactory::ComputePipelineSpecification::operator==(const ComputePipe
     return m_shaders == other.m_shaders;
 }
 
-PipelineFactory::GraphicsPipelineSpecification::GraphicsPipelineSpecification(std::vector<std::string>&& shaders)
+PipelineFactory::GraphicsPipelineSpecification::GraphicsPipelineSpecification(std::vector<Shader>&& shaders)
     : m_shaders(shaders)
 {
     memset(&m_pod, 0, sizeof(m_pod));

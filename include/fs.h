@@ -44,9 +44,9 @@ public:
 
 class istream : public base_stream, public std::istream {
 public:
-    istream(const std::string& filename);
+    istream(std::string_view filename);
     istream(const file& f)
-        : istream(f.path())
+        : istream(std::string_view(f.path()))
     {
     }
     virtual ~istream();

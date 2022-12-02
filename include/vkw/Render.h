@@ -92,7 +92,35 @@ public:
     inline const std::vector<VkDescriptorSetLayoutBinding>& bindings() const { return m_bindings; }
 };
 
-class DescriptorSet;
+class DescriptorSet {
+private:
+    const Device& m_device;
+    VkSampler m_active_sampler;
+    std::array<VkDescriptorSet, 2> m_handle;
+
+    std::vector<VkWriteDescriptorSet> m_writes;
+    std::vector<VkDescriptorBufferInfo> m_buffers;
+    std::vector<VkDescriptorImageInfo> m_images;
+
+    friend class DescriptorPool;
+
+    DescriptorSet(const Device& device, VkDescriptorSet h0, VkDescriptorSet h1)
+        : m_device(device)
+        , m_active_sampler(VK_NULL_HANDLE)
+        , m_handle({ h0, h1 })
+    {
+    }
+
+public:
+    inline operator VkDescriptorSet() const { return m_handle[m_device.current_frame() % 2]; }
+
+    void bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<2>& buffer, VkDeviceSize offset, VkDeviceSize range = VK_WHOLE_SIZE);
+    void bind_image(uint32_t binding, VkDescriptorType type, const ImageView<1>& image, VkImageLayout layout, VkSampler sampler = VK_NULL_HANDLE);
+    inline void bind_image_sampler(VkSampler sampler) { m_active_sampler = sampler; }
+    void update();
+};
+
+class Pipeline;
 
 class DescriptorPool {
 private:
@@ -109,84 +137,53 @@ public:
     DescriptorPool(const Device&);
     ~DescriptorPool();
 
+    std::vector<DescriptorSet> allocate(const Pipeline& pipeline);
     DescriptorSet allocate(VkDescriptorSetLayout layout);
     void reset();
 };
 
-class DescriptorSet {
-private:
-    const Device& m_device;
-    std::array<VkDescriptorSet, 2> m_handle;
-
-    std::vector<VkWriteDescriptorSet> m_writes;
-    std::vector<VkDescriptorBufferInfo> m_buffers;
-    std::vector<VkDescriptorImageInfo> m_images;
-
-    friend class DescriptorPool;
-
-    DescriptorSet(const Device& device, const std::array<VkDescriptorSet, 2>& h)
-        : m_device(device)
-        , m_handle(h)
-    {
-    }
-
-public:
-    inline operator VkDescriptorSet() const { return m_handle[m_device.current_frame() % 2]; }
-
-    void bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<2>& buffer, VkDeviceSize offset, VkDeviceSize range = VK_WHOLE_SIZE);
-    void bind_image(uint32_t binding, VkDescriptorType type, const ImageView<1>& image, VkImageLayout layout, const Sampler& sampler);
-    void update();
-};
-
-// TODO: Could this be a private member of ShaderFactory?
-class ShaderModule {
-private:
-    VkPipelineShaderStageCreateInfo m_createinfo {};
-    std::vector<DescriptorSetLayoutInfo> m_descriptor_set_layout_info;
-    std::vector<VkPushConstantRange> m_push_constants;
-
-    ShaderModule(VkDevice device, const void* spv, size_t len);
-    ShaderModule(const ShaderModule& base, VkSpecializationInfo* specialization);
-    void destroy(VkDevice device);
-
-    friend class ShaderFactory;
-
-public:
-    ShaderModule(const ShaderModule&) = default;
-    ShaderModule(ShaderModule&&) = default;
-
-    inline operator VkPipelineShaderStageCreateInfo() const { return m_createinfo; }
-    inline operator VkShaderModule() const { return m_createinfo.module; }
-    inline VkShaderStageFlags stage() const { return m_createinfo.stage; }
-    inline const std::vector<VkPushConstantRange>& push_constants() const { return m_push_constants; }
-    inline const std::vector<DescriptorSetLayoutInfo>& descriptor_set_layout_info() const { return m_descriptor_set_layout_info; }
-};
-
 // TODO: Fold into Device class?
+using Shader = size_t;
 class ShaderFactory {
 private:
-    struct shader_specialization_data {
+    struct module {
+        VkPipelineShaderStageCreateInfo m_createinfo {};
+        std::vector<DescriptorSetLayoutInfo> m_descriptor_set_layout_info;
+        std::vector<VkPushConstantRange> m_push_constants;
+
+        module(VkDevice device, const void* spv, size_t len, VkSpecializationInfo* specialization);
+        module(const module&) = default;
+
+        inline const std::vector<DescriptorSetLayoutInfo>& descriptor_set_layout_info() const { return m_descriptor_set_layout_info; }
+        inline const std::vector<VkPushConstantRange>& push_constants() const { return m_push_constants; }
+        inline const VkPipelineShaderStageCreateInfo& stage() const { return m_createinfo; }
+    };
+    struct specialization_data {
         VkSpecializationInfo info;
+        std::unique_ptr<char[]> specdata;
         std::vector<VkSpecializationMapEntry> entries;
 
-        shader_specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
-        ~shader_specialization_data();
+        specialization_data(const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
     };
 
     VkDevice m_device;
-    std::unordered_map<std::string, ShaderModule> m_cache;
-    std::vector<ShaderModule> m_specialized;
-    std::vector<shader_specialization_data> m_specialized_data;
+    std::unordered_map<std::string, Shader> m_cache;
+    std::vector<specialization_data> m_specialization_data;
+    std::vector<module> m_shaders;
 
 public:
-    ShaderFactory(const Device&);
+    using Handle = size_t;
+
+    ShaderFactory(const Device& device)
+        : m_device(device)
+    {
+    }
     ShaderFactory(const ShaderFactory&) = delete;
     ~ShaderFactory();
-    void clear(bool all = false);
 
-    ShaderModule& open(const fs::file& path);
-    ShaderModule& specialize(const std::string& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
-    const ShaderModule& get(const std::string& path) const;
+    Shader open(const fs::file& path);
+    Shader open(const fs::file& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
+    inline const module& get(Shader s) const { return m_shaders.at(s); }
 };
 
 class RenderPass;
@@ -373,7 +370,8 @@ public:
     ~Pipeline();
     inline VkPipelineBindPoint bind_point() const { return m_bind_point; }
     inline VkPipelineLayout layout() const { return m_layout; }
-    inline const VkDescriptorSetLayout& descriptor_set_layout(int i) { return m_descriptor_set_layout[i]; }
+    inline size_t descriptor_set_count() const { return m_descriptor_set_layout.size(); }
+    inline const VkDescriptorSetLayout& descriptor_set_layout(int i) const { return m_descriptor_set_layout[i]; }
     inline operator VkPipeline() const { return m_handle; }
 };
 
@@ -381,12 +379,12 @@ class PipelineFactory {
 public:
     class ComputePipelineSpecification {
     private:
-        std::vector<std::string> m_shaders;
+        std::vector<Shader> m_shaders;
 
         friend class PipelineFactory;
 
     public:
-        ComputePipelineSpecification(std::vector<std::string>&& shaders)
+        ComputePipelineSpecification(std::vector<Shader>&& shaders)
             : m_shaders(shaders)
         {
         }
@@ -396,7 +394,7 @@ public:
 
     class GraphicsPipelineSpecification {
     private:
-        std::vector<std::string> m_shaders;
+        std::vector<Shader> m_shaders;
         struct {
             VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
             VkPipelineTessellationStateCreateInfo tessellation_state;
@@ -419,7 +417,7 @@ public:
         friend class PipelineFactory;
 
     public:
-        GraphicsPipelineSpecification(std::vector<std::string>&& shaders);
+        GraphicsPipelineSpecification(std::vector<Shader>&& shaders);
         bool operator==(const GraphicsPipelineSpecification& other) const;
 
         GraphicsPipelineSpecification& set_vertex_input_attribute(uint32_t location, uint32_t binding, VkFormat format, size_t offset);
@@ -478,7 +476,7 @@ private:
     std::vector<std::vector<std::pair<Pipeline, GraphicsPipelineSpecification>>> m_graphics;
     // Top level: hash(shaders), then memcmp pod, then compare vectors
 
-    size_t spec_bucket(const std::vector<std::string>& shaders);
+    size_t spec_bucket(const std::vector<Shader>& shaders);
 
 public:
     PipelineFactory(const Device&, const ShaderFactory&, size_t bucket_count = 16);
@@ -548,8 +546,10 @@ public:
         begin_render_pass(render_pass, framebuffer, 0, 0, framebuffer.width(), framebuffer.height(), contents);
     }
     void bind_descriptor_set(uint32_t set_number, VkDescriptorSet handle);
+    void bind_descriptor_sets(size_t count, vkw::DescriptorSet* descriptor_sets);
     void bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
     void bind_pipeline(const Pipeline& pipeline);
+    void push_constants(VkShaderStageFlags stage, uint32_t offset, uint32_t size, const void* data);
     void bind_vertex_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize offset);
     void set_image_layout(VkImage image, VkImageLayout from, VkImageLayout to, VkImageSubresourceRange& subresource, VkPipelineStageFlags src_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VkPipelineStageFlags dst_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     void set_viewport(float x, float y, float width, float height, float min_depth, float max_depth);

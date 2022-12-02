@@ -4,11 +4,11 @@
 #include <spdlog/spdlog.h>
 
 #ifdef NDEBUG
-#define ENABLE_VALIDATION_LAYERS 0
+constexpr static bool ENABLE_VALIDATION_LAYERS = false;
 constexpr static const char** INSTANCE_LAYERS = nullptr;
 constexpr static uint32_t INSTANCE_LAYERS_COUNT = 0;
 #else
-#define ENABLE_VALIDATION_LAYERS 1
+constexpr static bool ENABLE_VALIDATION_LAYERS = true;
 constexpr static const char* INSTANCE_LAYERS[] = { "VK_LAYER_KHRONOS_validation" };
 constexpr static uint32_t INSTANCE_LAYERS_COUNT = 1;
 #endif

@@ -206,18 +206,21 @@ size_t base_stream::length() const
     return PHYSFS_fileLength(reinterpret_cast<PHYSFS_File*>(m_handle));
 }
 
-static void* physfs_open(const std::string& filename, char mode)
+static void* physfs_open(std::string_view filename, char mode)
 {
     PHYSFS_File* f = nullptr;
+    std::vector<char> filename_buffer(filename.size() + 1);
+    sprintf(filename_buffer.data(), "%.*s", static_cast<int>(filename.size()), filename.data());
+
     switch (mode) {
     case 'r':
-        f = PHYSFS_openRead(filename.c_str());
+        f = PHYSFS_openRead(filename_buffer.data());
         break;
     case 'w':
-        f = PHYSFS_openWrite(filename.c_str());
+        f = PHYSFS_openWrite(filename_buffer.data());
         break;
     case 'a':
-        f = PHYSFS_openAppend(filename.c_str());
+        f = PHYSFS_openAppend(filename_buffer.data());
         break;
     }
     if (f == nullptr) {
@@ -227,7 +230,7 @@ static void* physfs_open(const std::string& filename, char mode)
     return reinterpret_cast<void*>(f);
 }
 
-istream::istream(const std::string& filename)
+istream::istream(std::string_view filename)
     : base_stream(physfs_open(filename, 'r'))
     , std::istream(new fstreambuf(reinterpret_cast<PHYSFS_File*>(m_handle)))
 {

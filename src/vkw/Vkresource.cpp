@@ -53,9 +53,7 @@ Buffer<N>::Buffer(Buffer<N>& src_buffer, MemoryUsage mem_usage, VkBufferUsageFla
 template <unsigned int N>
 Buffer<N>::~Buffer()
 {
-    m_allocation.free();
-    for (VkBuffer& buffer : m_handle)
-        vkDestroyBuffer(device(), buffer, nullptr);
+    destroy();
 }
 
 template <unsigned int N>
@@ -86,6 +84,16 @@ void Buffer<N>::create_empty(Allocator& allocator, MemoryUsage mem_usage, VkBuff
             abort();
         }
     }
+}
+
+template <unsigned int N>
+void Buffer<N>::destroy()
+{
+    m_allocation.free();
+    for (VkBuffer& buffer : m_handle)
+        vkDestroyBuffer(device(), buffer, nullptr);
+
+    m_handle.fill(VK_NULL_HANDLE);
 }
 
 template <unsigned int N>
@@ -503,13 +511,12 @@ Image<N>::Image(Allocator& allocator, MemoryUsage mem_usage, VkImageType type, V
 }
 
 template <>
-Image<1>::Image(HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling, const std::initializer_list<QueueFamilyType>& queue_families, VkImageCreateFlags flags)
+Image<1>::Image(Allocator& allocator, HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling, const std::initializer_list<QueueFamilyType>& queue_families, VkImageCreateFlags flags)
     : m_createinfo(src_image.m_createinfo)
     , m_mem_usage(mem_usage)
-    , m_allocation(src_image.m_allocation.allocator())
+    , m_allocation(allocator)
 {
     VkResult res;
-    Allocator& allocator = m_allocation.allocator();
     const Device& device = allocator.device();
 
     m_createinfo.usage |= usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -538,8 +545,8 @@ Image<1>::Image(HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags u
 }
 
 template <unsigned int N>
-Image<N>::Image(HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling, const std::initializer_list<QueueFamilyType>& queue_families, VkImageCreateFlags flags)
-    : m_allocation(src_image.m_allocation.allocator())
+Image<N>::Image(Allocator& allocator, HostImage& src_image, MemoryUsage mem_usage, VkImageUsageFlags usage, VkImageTiling tiling, const std::initializer_list<QueueFamilyType>& queue_families, VkImageCreateFlags flags)
+    : m_allocation(allocator)
 {
     spdlog::critical("Image<{}>::Image(HostImage&, MemoryUsage): invalid usage", N);
     abort();
@@ -651,7 +658,14 @@ template class Image<1>;
 template class Image<2>;
 
 template <unsigned int N>
-void ImageView<N>::create(vkw::Image<N>& image, VkImageViewType type, VkFormat format, VkImageAspectFlags aspect_mask, const std::array<uint32_t, 2>& array_layers, const std::array<uint32_t, 2>& mip_levels)
+ImageView<N>::ImageView(const vkw::Device& device, vkw::Image<N>& src_image, VkImageViewType type, VkFormat format, VkImageAspectFlags aspect_mask, const std::array<uint32_t, 2>& array_layers, const std::array<uint32_t, 2>& mip_levels)
+    : m_device(device)
+{
+    create(src_image, type, format, aspect_mask, array_layers, mip_levels);
+}
+
+template <unsigned int N>
+void ImageView<N>::create(vkw::Image<N>& src_image, VkImageViewType type, VkFormat format, VkImageAspectFlags aspect_mask, const std::array<uint32_t, 2>& array_layers, const std::array<uint32_t, 2>& mip_levels)
 {
     VkImageViewCreateInfo createinfo {};
     createinfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -659,12 +673,12 @@ void ImageView<N>::create(vkw::Image<N>& image, VkImageViewType type, VkFormat f
     createinfo.format = format;
     createinfo.subresourceRange.aspectMask = aspect_mask;
     createinfo.subresourceRange.baseArrayLayer = array_layers[0];
-    createinfo.subresourceRange.layerCount = array_layers[1] ? array_layers[1] : image.layers();
+    createinfo.subresourceRange.layerCount = array_layers[1] ? array_layers[1] : src_image.layers();
     createinfo.subresourceRange.baseMipLevel = mip_levels[0];
-    createinfo.subresourceRange.levelCount = mip_levels[1] ? mip_levels[1] : image.mip_levels();
+    createinfo.subresourceRange.levelCount = mip_levels[1] ? mip_levels[1] : src_image.mip_levels();
     for (int i = 0; i < N; i++) {
         VkResult res;
-        createinfo.image = image[i];
+        createinfo.image = src_image[i];
         if ((res = vkCreateImageView(m_device, &createinfo, nullptr, &m_handle[i])) != VK_SUCCESS) {
             spdlog::critical("vkCreateImageView: {}", res);
             abort();

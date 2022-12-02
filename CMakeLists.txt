@@ -94,6 +94,7 @@ add_executable(game
     "src/vkw/Render.cpp"
     "src/vkw/CommandBuffer.cpp"
     "src/vkw/Vkresource.cpp"
+    "src/scene.cpp"
     "src/fs.cpp")
 add_dependencies(game shaders)
 target_link_libraries(game
