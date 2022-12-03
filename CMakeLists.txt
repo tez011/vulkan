@@ -87,6 +87,8 @@ endforeach()
 add_custom_target(shaders DEPENDS ${SPIRV_BINARY_FILES})
 
 # ---- Application ----
+add_compile_definitions(GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 add_executable(game
     "src/main.cpp"
     "src/vkw/Device.cpp"
@@ -104,6 +106,5 @@ target_link_libraries(game
     physfs-static
     spdlog
     spng
-    spirv-reflect-static
     Vulkan::Vulkan
 )

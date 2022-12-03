@@ -11,21 +11,22 @@ class Mesh {
 public:
     virtual void initialize_buffers(vkw::CommandBuffer& cmd) = 0;
     virtual void cleanup_initialize_buffers() = 0;
-    virtual void draw(vkw::CommandBuffer& cmd) = 0;
+    virtual void draw(vkw::CommandBuffer& cmd) const = 0;
 };
 
 class Material {
+protected:
+    vkw::DescriptorSet m_descriptor_set;
+
 public:
+    Material(vkw::DescriptorSet&& d)
+        : m_descriptor_set(std::move(d))
+    {
+    }
     virtual void initialize_buffers(vkw::CommandBuffer& cmd) = 0;
     virtual void cleanup_initialize_buffers() = 0;
-    virtual void bind(vkw::DescriptorSet& material_descriptor) = 0;
+    virtual const vkw::DescriptorSet& descriptor_set() const { return m_descriptor_set; }
 };
-
-class Camera {
-};
-
-class FirstPersonCamera : public Camera { }; // FPS camera from https://www.3dgep.com/understanding-the-view-matrix/
-class ThirdPersonCamera : public Camera { }; // MGSV camera. Like an arcball camera, but range of motion is restricted.
 
 class Node {
 protected:
@@ -66,11 +67,11 @@ public:
 
 class Geometry : public Node {
 private:
-    Mesh* m_mesh;
-    Material* m_material;
+    Mesh& m_mesh;
+    Material& m_material;
 
 public:
-    Geometry(Node* parent, Mesh* mesh, Material* material)
+    Geometry(Node* parent, Mesh& mesh, Material& material)
         : Node(parent)
         , m_mesh(mesh)
         , m_material(material)
@@ -78,8 +79,8 @@ public:
     }
     virtual Type type() const noexcept { return Type::Geometry; }
 
-    Mesh* mesh() const { return m_mesh; }
-    Material* material() const { return m_material; }
+    const Mesh& mesh() const { return m_mesh; }
+    const Material& material() const { return m_material; }
 };
 
 class StaticTransform : public Node {
@@ -101,7 +102,7 @@ private:
     glm::quat m_rotation;
 
 public:
-    Rotation(Node* parent, const glm::quat& rotation)
+    Rotation(Node* parent, const glm::quat& rotation = { 1.f, 0.f, 0.f, 0.f })
         : Node(parent)
         , m_rotation(rotation)
     {
@@ -124,7 +125,7 @@ public:
     {
     }
 
-    inline operator Node*() { return &m_root; }
+    inline Node* root() { return &m_root; }
 };
 
 class SceneVisitor {
@@ -133,10 +134,11 @@ class SceneVisitor {
 public:
     SceneVisitor();
 
+    void visit(Scene& scene) { visit(scene.root()); }
     void visit(Node* node);
     inline const glm::mat4& current_matrix() const { return m_matrix_stack.top(); }
 
-    virtual void visitGeometry(Geometry* geometry) = 0;
+    virtual void visitGeometry(Geometry& geometry) = 0;
 };
 
 }

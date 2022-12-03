@@ -48,12 +48,6 @@ CPMAddPackage(NAME spng
               GITHUB_REPOSITORY randy408/libspng
               GIT_TAG v0.7.2
               DOWNLOAD_ONLY TRUE)
-CPMAddPackage(NAME spirvreflect
-              GITHUB_REPOSITORY KhronosGroup/SPIRV-Reflect
-              GIT_TAG b68b5a8a5d8ab5fce79e6596f3a731291046393a
-              OPTIONS "SPIRV_REFLECT_EXECUTABLE OFF"
-                      "SPIRV_REFLECT_EXAMPLES OFF"
-                      "SPIRV_REFLECT_STATIC_LIB ON")
 find_package(Vulkan REQUIRED)
 
 # ---- KTX cleanup ----

@@ -6,7 +6,6 @@
 #define GLM_FORCE_RADIANS
 #include "fs.h"
 #include "scene.h"
-#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/string_cast.hpp>
@@ -40,7 +39,7 @@ public:
         host_buffer.destroy();
     }
 
-    void draw(vkw::CommandBuffer& cbuffer)
+    void draw(vkw::CommandBuffer& cbuffer) const
     {
         cbuffer.bind_vertex_buffer(0, vertex_buffer, 0);
         cbuffer.bind_vertex_buffer(1, vertex_buffer, 28788);
@@ -55,11 +54,14 @@ public:
     vkw::HostImage texture_data;
     vkw::Image<1> texture_image;
     vkw::ImageView<1> texture_image_view;
+    vkw::Sampler& sampler;
 
-    DuckMaterial(vkw::Allocator& allocator)
-        : texture_data(allocator, vkw::HostImage::InputFormat::PNG, fs::istream("/rs/DuckCM.png"), true)
+    DuckMaterial(vkw::Allocator& allocator, vkw::Sampler& sampler, vkw::DescriptorSet&& d)
+        : Material(std::move(d))
+        , texture_data(allocator, vkw::HostImage::InputFormat::PNG, fs::istream("/rs/DuckCM.png"), true)
         , texture_image(allocator, texture_data, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_USAGE_SAMPLED_BIT)
         , texture_image_view(allocator.device(), texture_image, VK_IMAGE_VIEW_TYPE_2D, texture_image.format())
+        , sampler(sampler)
     {
     }
 
@@ -72,32 +74,26 @@ public:
     void cleanup_initialize_buffers()
     {
         texture_data.destroy();
-    }
 
-    void bind(vkw::DescriptorSet& descriptor_set)
-    {
-        descriptor_set.bind_image(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, texture_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        descriptor_set.update();
+        m_descriptor_set.bind_image(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, texture_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, sampler);
+        m_descriptor_set.update();
     }
 };
 
 class CoolVisitor : public scene::SceneVisitor {
-    vkw::CommandBuffer* m_cmd;
-    std::vector<vkw::DescriptorSet>* m_descriptor_sets;
+    vkw::CommandBuffer* m_cmd = nullptr;
 
 public:
-    void set_command_info(vkw::CommandBuffer& cmd, std::vector<vkw::DescriptorSet>& descriptor_sets)
+    void set_command_info(vkw::CommandBuffer& cmd)
     {
         m_cmd = &cmd;
-        m_descriptor_sets = &descriptor_sets;
     }
 
-    virtual void visitGeometry(scene::Geometry* geometry)
+    virtual void visitGeometry(scene::Geometry& geometry)
     {
-        geometry->material()->bind(m_descriptor_sets->at(2));
-        m_cmd->bind_descriptor_sets(m_descriptor_sets->size(), m_descriptor_sets->data());
+        m_cmd->bind_descriptor_set(3, geometry.material().descriptor_set());
         m_cmd->push_constants(VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &current_matrix());
-        geometry->mesh()->draw(*m_cmd);
+        geometry.mesh().draw(*m_cmd);
     }
 };
 
@@ -133,8 +129,8 @@ int main(int argc, char** argv)
     vkw::Semaphore image_available(device), render_finished(device);
     vkw::Fence fence(device, true);
     vkw::ShaderFactory shader_factory(device);
-    vkw::Shader vert = shader_factory.open(fs::file("/rs/shaders/duck.vert.spv")),
-                frag = shader_factory.open(fs::file("/rs/shaders/duck.frag.spv"));
+    vkw::Shader vert = shader_factory.open(fs::file("/rs/shaders/duck.vert.spv"), VK_SHADER_STAGE_VERTEX_BIT),
+                frag = shader_factory.open(fs::file("/rs/shaders/duck.frag.spv"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
     vkw::Allocator allocator(device, true);
     vkw::Image<2> depth_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, { device.swapchain().width(), device.swapchain().height(), 1 }, VK_FORMAT_D24_UNORM_S8_UINT, 1, 1, 1);
@@ -185,7 +181,13 @@ int main(int argc, char** argv)
     });
 
     vkw::PipelineFactory pipeline_factory(device, shader_factory);
-    vkw::PipelineFactory::GraphicsPipelineSpecification pb({ vert, frag });
+    vkw::PipelineLayout pipeline_layout = vkw::PipelineLayout::build()
+                                              .with_descriptor_binding(1, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT)
+                                              .with_descriptor_binding(3, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
+                                              .with_push_constant_range(0, sizeof(glm::mat4), VK_SHADER_STAGE_VERTEX_BIT)
+                                              .build(device);
+
+    vkw::PipelineFactory::GraphicsPipelineSpecification pb({ vert, frag }, pipeline_layout);
     pb.set_vertex_input_binding(0, 12);
     pb.set_vertex_input_binding(1, 12);
     pb.set_vertex_input_binding(2, 8);
@@ -204,19 +206,20 @@ int main(int argc, char** argv)
     pb.set_render_pass(render_pass, 0);
     vkw::Pipeline& pipeline = pipeline_factory.get(pb);
 
-    vkw::DescriptorPool descriptor_pool(device);
-    std::vector<vkw::DescriptorSet> descriptor_sets = descriptor_pool.allocate(pipeline);
-    descriptor_sets[2].bind_image_sampler(texture_sampler);
-
     vkw::CommandPool command_pool(device, vkw::QueueFamilyType::Graphics, 1, 0);
+    vkw::DescriptorPool descriptor_pool(device);
+    vkw::DescriptorSet descriptor_set_global = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(0)),
+                       descriptor_set_perpass = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(1)),
+                       descriptor_set_perobject = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(2)),
+                       descriptor_set_duckmaterial = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(3));
 
     DuckMesh duck(allocator);
-    DuckMaterial duck_material(allocator);
+    DuckMaterial duck_material(allocator, texture_sampler, std::move(descriptor_set_duckmaterial));
     vkw::HostBuffer<2> uniform_buffer(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 2 * sizeof(glm::mat4)); // probably this is gonna get split up
 
     Scene main_scene;
-    scene::Rotation n1(main_scene, glm::angleAxis(glm::radians(30.f), glm::vec3(0.f, 0.f, 1.f)));
-    scene::Geometry n2(&n1, &duck, &duck_material);
+    scene::Rotation n1(main_scene.root());
+    scene::Geometry n2(&n1, duck, duck_material);
     CoolVisitor visitor;
 
     auto& cmd = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
@@ -245,22 +248,21 @@ int main(int argc, char** argv)
         n1.set_rotation(glm::angleAxis(glm::radians(90.f) * time, glm::vec3(0.f, 1.f, 0.f)));
 
         glm::mat4 mvp[2];
-        mvp[0] = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 1.f, 10000.f);
+        mvp[0] = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 1.f, 1000.f);
         mvp[1] = glm::lookAt(glm::vec3(0.f, 250.f, 400.f), glm::vec3(0.0f, 100.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         mvp[0][1][1] *= -1;
         uniform_buffer.write_mapped(&mvp, 2 * sizeof(glm::mat4));
-        descriptor_sets[0].bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 0 * sizeof(glm::mat4), sizeof(glm::mat4));
-        descriptor_sets[1].bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 1 * sizeof(glm::mat4), sizeof(glm::mat4));
-        descriptor_sets[0].update();
-        descriptor_sets[1].update();
+        descriptor_set_perpass.bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 0, 2 * sizeof(glm::mat4));
+        descriptor_set_perpass.update();
 
         auto& cbuffer = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
         cbuffer.begin();
         cbuffer.begin_render_pass(render_pass, framebuffer, VK_SUBPASS_CONTENTS_INLINE);
-        cbuffer.set_viewport(0, 0, (float)device.swapchain().width(), (float)device.swapchain().height(), 0, 1);
+        cbuffer.set_viewport(0, 0, device.swapchain().width(), device.swapchain().height(), 0, 1);
         cbuffer.set_scissor(0, 0, device.swapchain().width(), device.swapchain().height());
         cbuffer.bind_pipeline(pipeline);
-        visitor.set_command_info(cbuffer, descriptor_sets);
+        cbuffer.bind_descriptor_set(1, descriptor_set_perpass);
+        visitor.set_command_info(cbuffer);
         visitor.visit(main_scene);
         vkCmdEndRenderPass(cbuffer);
         cbuffer.end();

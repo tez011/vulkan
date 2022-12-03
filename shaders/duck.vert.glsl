@@ -1,9 +1,7 @@
 #version 450
 
-layout(set = 0, binding = 0) uniform ProjectionMatrix {
+layout(set = 1, binding = 0) uniform VPMatrix {
     mat4 proj;
-};
-layout(set = 1, binding = 0) uniform ViewMatrix {
     mat4 view;
 };
 layout(push_constant) uniform ModelMatrix {

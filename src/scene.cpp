@@ -29,7 +29,9 @@ void SceneVisitor::visit(Node* node)
         }
         break;
     case Nodetype::Geometry:
-        visitGeometry(reinterpret_cast<Geometry*>(node));
+        visitGeometry(*reinterpret_cast<Geometry*>(node));
+        break;
+    default:
         break;
     }
 

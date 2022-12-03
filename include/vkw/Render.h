@@ -2,7 +2,6 @@
 #include "Allocator.h"
 #include "Device.h"
 #include "Vkresource.h"
-#include "spirv_reflect.h"
 #include <array>
 #include <list>
 #include <unordered_map>
@@ -81,17 +80,6 @@ public:
     inline operator VkSampler() const { return m_handle; }
 };
 
-class DescriptorSetLayoutInfo {
-private:
-    uint32_t m_set_number;
-    std::vector<VkDescriptorSetLayoutBinding> m_bindings;
-
-public:
-    DescriptorSetLayoutInfo(const SpvReflectShaderModule& reflect, const SpvReflectDescriptorSet& descriptor_set);
-    inline uint32_t set() const { return m_set_number; }
-    inline const std::vector<VkDescriptorSetLayoutBinding>& bindings() const { return m_bindings; }
-};
-
 class DescriptorSet {
 private:
     const Device& m_device;
@@ -112,6 +100,7 @@ private:
     }
 
 public:
+    DescriptorSet(DescriptorSet&&) = default;
     inline operator VkDescriptorSet() const { return m_handle[m_device.current_frame() % 2]; }
 
     void bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<2>& buffer, VkDeviceSize offset, VkDeviceSize range = VK_WHOLE_SIZE);
@@ -137,7 +126,6 @@ public:
     DescriptorPool(const Device&);
     ~DescriptorPool();
 
-    std::vector<DescriptorSet> allocate(const Pipeline& pipeline);
     DescriptorSet allocate(VkDescriptorSetLayout layout);
     void reset();
 };
@@ -148,14 +136,10 @@ class ShaderFactory {
 private:
     struct module {
         VkPipelineShaderStageCreateInfo m_createinfo {};
-        std::vector<DescriptorSetLayoutInfo> m_descriptor_set_layout_info;
-        std::vector<VkPushConstantRange> m_push_constants;
 
-        module(VkDevice device, const void* spv, size_t len, VkSpecializationInfo* specialization);
+        module(VkDevice device, const void* spv, size_t len, VkShaderStageFlagBits stage, VkSpecializationInfo* specialization);
         module(const module&) = default;
 
-        inline const std::vector<DescriptorSetLayoutInfo>& descriptor_set_layout_info() const { return m_descriptor_set_layout_info; }
-        inline const std::vector<VkPushConstantRange>& push_constants() const { return m_push_constants; }
         inline const VkPipelineShaderStageCreateInfo& stage() const { return m_createinfo; }
     };
     struct specialization_data {
@@ -181,8 +165,8 @@ public:
     ShaderFactory(const ShaderFactory&) = delete;
     ~ShaderFactory();
 
-    Shader open(const fs::file& path);
-    Shader open(const fs::file& path, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
+    Shader open(const fs::file& path, VkShaderStageFlagBits stage);
+    Shader open(const fs::file& path, VkShaderStageFlagBits stage, const void* specialization, size_t size, std::vector<VkSpecializationMapEntry>&& index);
     inline const module& get(Shader s) const { return m_shaders.at(s); }
 };
 
@@ -345,33 +329,55 @@ public:
     };
 };
 
+class PipelineLayout {
+private:
+    constexpr static size_t DESCRIPTOR_SET_COUNT = 4;
+    VkDevice m_device;
+    VkPipelineLayout m_layout;
+    std::array<VkDescriptorSetLayout, DESCRIPTOR_SET_COUNT> m_descriptor_set_layouts;
+
+    class Builder {
+    private:
+        std::array<std::vector<VkDescriptorSetLayoutBinding>, DESCRIPTOR_SET_COUNT> m_bindings;
+        std::vector<VkPushConstantRange> m_push_constants;
+        std::vector<std::vector<VkSampler>> m_immutable_samplers;
+
+    public:
+        Builder& with_descriptor_binding(uint32_t set, uint32_t binding, VkDescriptorType type, uint32_t count, VkShaderStageFlags stage = VK_SHADER_STAGE_ALL, std::initializer_list<VkSampler> immutable_samplers = {});
+        Builder& with_push_constant_range(uint32_t offset, uint32_t size, VkShaderStageFlags stage);
+        PipelineLayout build(const Device&);
+    };
+
+    PipelineLayout(const Device& device, VkPipelineLayout layout, std::array<VkDescriptorSetLayout, DESCRIPTOR_SET_COUNT>&& descriptor_set_layouts);
+
+public:
+    ~PipelineLayout();
+    inline VkDescriptorSetLayout descriptor_set_layout(size_t i) const { return m_descriptor_set_layouts[i]; }
+    inline operator VkPipelineLayout() const { return m_layout; }
+
+    static Builder build() { return Builder(); }
+};
+
 class Pipeline {
 private:
     VkDevice m_device;
-    VkPipelineBindPoint m_bind_point;
-    std::vector<VkDescriptorSetLayout> m_descriptor_set_layout;
-    VkPipelineLayout m_layout;
     VkPipeline m_handle;
-
-    Pipeline(VkDevice device, VkPipelineBindPoint bind_point)
-        : m_device(device)
-        , m_bind_point(bind_point)
-        , m_layout(VK_NULL_HANDLE)
-        , m_handle(VK_NULL_HANDLE)
-    {
-    }
-    void set_layouts(uint32_t layout_count, const std::vector<VkDescriptorSetLayoutBinding>* descriptor_layout_bindings, const std::vector<VkPushConstantRange>& push_constant_ranges);
-
-    friend class PipelineFactory;
+    VkPipelineLayout m_layout;
+    VkPipelineBindPoint m_bind_point;
 
 public:
+    Pipeline(VkDevice device, VkPipelineBindPoint bind_point, VkPipeline handle, VkPipelineLayout layout)
+        : m_device(device)
+        , m_handle(handle)
+        , m_layout(layout)
+        , m_bind_point(bind_point)
+    {
+    }
     Pipeline(const Pipeline&) = delete;
     Pipeline(Pipeline&&) = default;
     ~Pipeline();
     inline VkPipelineBindPoint bind_point() const { return m_bind_point; }
     inline VkPipelineLayout layout() const { return m_layout; }
-    inline size_t descriptor_set_count() const { return m_descriptor_set_layout.size(); }
-    inline const VkDescriptorSetLayout& descriptor_set_layout(int i) const { return m_descriptor_set_layout[i]; }
     inline operator VkPipeline() const { return m_handle; }
 };
 
@@ -380,12 +386,14 @@ public:
     class ComputePipelineSpecification {
     private:
         std::vector<Shader> m_shaders;
+        VkPipelineLayout m_layout;
 
         friend class PipelineFactory;
 
     public:
-        ComputePipelineSpecification(std::vector<Shader>&& shaders)
+        ComputePipelineSpecification(std::vector<Shader>&& shaders, VkPipelineLayout layout)
             : m_shaders(shaders)
+            , m_layout(layout)
         {
         }
 
@@ -395,6 +403,7 @@ public:
     class GraphicsPipelineSpecification {
     private:
         std::vector<Shader> m_shaders;
+        VkPipelineLayout m_layout;
         struct {
             VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
             VkPipelineTessellationStateCreateInfo tessellation_state;
@@ -417,7 +426,7 @@ public:
         friend class PipelineFactory;
 
     public:
-        GraphicsPipelineSpecification(std::vector<Shader>&& shaders);
+        GraphicsPipelineSpecification(std::vector<Shader>&& shaders, VkPipelineLayout layout);
         bool operator==(const GraphicsPipelineSpecification& other) const;
 
         GraphicsPipelineSpecification& set_vertex_input_attribute(uint32_t location, uint32_t binding, VkFormat format, size_t offset);
@@ -472,9 +481,9 @@ private:
     VkPipelineCache m_persistent_cache;
 
     size_t m_bucket_count;
-    std::vector<std::vector<std::pair<Pipeline, ComputePipelineSpecification>>> m_compute;
-    std::vector<std::vector<std::pair<Pipeline, GraphicsPipelineSpecification>>> m_graphics;
-    // Top level: hash(shaders), then memcmp pod, then compare vectors
+    std::vector<Pipeline> m_compute, m_graphics;
+    std::vector<ComputePipelineSpecification> m_compute_specs;
+    std::vector<GraphicsPipelineSpecification> m_graphics_specs;
 
     size_t spec_bucket(const std::vector<Shader>& shaders);
 
@@ -546,7 +555,6 @@ public:
         begin_render_pass(render_pass, framebuffer, 0, 0, framebuffer.width(), framebuffer.height(), contents);
     }
     void bind_descriptor_set(uint32_t set_number, VkDescriptorSet handle);
-    void bind_descriptor_sets(size_t count, vkw::DescriptorSet* descriptor_sets);
     void bind_index_buffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
     void bind_pipeline(const Pipeline& pipeline);
     void push_constants(VkShaderStageFlags stage, uint32_t offset, uint32_t size, const void* data);
