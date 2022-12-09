@@ -1,7 +1,7 @@
 #pragma once
 #include "Allocator.h"
 #include "Device.h"
-#include "Vkresource.h"
+#include "resource.h"
 #include <array>
 #include <list>
 #include <unordered_map>
@@ -103,6 +103,7 @@ public:
     DescriptorSet(DescriptorSet&&) = default;
     inline operator VkDescriptorSet() const { return m_handle[m_device.current_frame() % 2]; }
 
+    void bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<1>& buffer, VkDeviceSize offset, VkDeviceSize range = VK_WHOLE_SIZE);
     void bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<2>& buffer, VkDeviceSize offset, VkDeviceSize range = VK_WHOLE_SIZE);
     void bind_image(uint32_t binding, VkDescriptorType type, const ImageView<1>& image, VkImageLayout layout, VkSampler sampler = VK_NULL_HANDLE);
     inline void bind_image_sampler(VkSampler sampler) { m_active_sampler = sampler; }

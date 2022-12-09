@@ -80,6 +80,114 @@ public:
     }
 };
 
+class OuterBoxMesh : public scene::Mesh {
+public:
+    vkw::HostBuffer<1> host_buffer;
+    vkw::Buffer<1> vertex_buffer, index_buffer;
+
+    OuterBoxMesh(vkw::Allocator& allocator)
+        : host_buffer(allocator, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, fs::istream("/rs/BoxAnimated0.bin"), 9308)
+        , vertex_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 7680)
+        , index_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 1524)
+    {
+    }
+
+    void initialize_buffers(vkw::CommandBuffer& cmd)
+    {
+        vertex_buffer.copy_from(host_buffer, cmd, 80);
+        index_buffer.copy_from(host_buffer, cmd, 7784);
+    }
+
+    void cleanup_initialize_buffers()
+    {
+        host_buffer.destroy();
+    }
+
+    void draw(vkw::CommandBuffer& cmd) const
+    {
+        cmd.bind_vertex_buffer(0, vertex_buffer, 2304);
+        cmd.bind_vertex_buffer(1, vertex_buffer, 4992);
+        cmd.bind_index_buffer(index_buffer, 372, VK_INDEX_TYPE_UINT16);
+        vkCmdDrawIndexed(cmd, 576, 1, 0, 0, 0);
+    }
+};
+
+class InnerBoxMesh : public scene::Mesh {
+public:
+    vkw::Buffer<1>& vertex_buffer;
+    vkw::Buffer<1>& index_buffer;
+
+    InnerBoxMesh(OuterBoxMesh& outer)
+        : vertex_buffer(outer.vertex_buffer)
+        , index_buffer(outer.index_buffer)
+    {
+        // everything is borrowed from OuterBoxMesh
+    }
+
+    void initialize_buffers(vkw::CommandBuffer& cmd) { }
+    void cleanup_initialize_buffers() { }
+
+    void draw(vkw::CommandBuffer& cmd) const
+    {
+        cmd.bind_vertex_buffer(0, vertex_buffer, 0);
+        cmd.bind_vertex_buffer(1, vertex_buffer, 1152);
+        cmd.bind_index_buffer(index_buffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdDrawIndexed(cmd, 186, 1, 0, 0, 0);
+    }
+};
+
+class BoxMaterial : public scene::Material {
+    vkw::HostBuffer<1> m_data;
+
+public:
+    BoxMaterial(vkw::Allocator& allocator, vkw::DescriptorSet&& d, const std::array<float, 3>& color)
+        : Material(std::move(d))
+        , m_data(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 12)
+    {
+        m_data.write_mapped(color.data(), color.size() * sizeof(float));
+    }
+
+    void initialize_buffers(vkw::CommandBuffer& cmd)
+    {
+    }
+
+    void cleanup_initialize_buffers()
+    {
+        m_descriptor_set.bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, m_data, 0);
+        m_descriptor_set.update();
+    }
+};
+
+template <class T>
+class LinearInterpolation {
+private:
+    std::vector<float> m_inputs;
+    std::vector<T> m_outputs;
+
+public:
+    LinearInterpolation(std::vector<float>&& inputs, std::vector<T>&& outputs)
+        : m_inputs(inputs)
+        , m_outputs(outputs)
+    {
+        assert(inputs.size() == outputs.size());
+    }
+
+    T get(float time)
+    {
+        if (time < m_inputs.front())
+            return m_outputs.front();
+        if (time >= m_inputs.back())
+            return m_outputs.back();
+
+        for (size_t i = 0; i < m_inputs.size() - 1; i++) {
+            if (m_inputs[i] <= time && time < m_inputs[i + 1]) {
+                return glm::mix(m_outputs[i], m_outputs[i + 1], (time - m_inputs[i]) / (m_inputs[i + 1] - m_inputs[i]));
+            }
+        }
+        abort();
+    }
+};
+
 class CoolVisitor : public scene::SceneVisitor {
     vkw::CommandBuffer* m_cmd = nullptr;
 
@@ -129,8 +237,8 @@ int main(int argc, char** argv)
     vkw::Semaphore image_available(device), render_finished(device);
     vkw::Fence fence(device, true);
     vkw::ShaderFactory shader_factory(device);
-    vkw::Shader vert = shader_factory.open(fs::file("/rs/shaders/duck.vert.spv"), VK_SHADER_STAGE_VERTEX_BIT),
-                frag = shader_factory.open(fs::file("/rs/shaders/duck.frag.spv"), VK_SHADER_STAGE_FRAGMENT_BIT);
+    vkw::Shader vert = shader_factory.open(fs::file("/rs/shaders/box.vert.spv"), VK_SHADER_STAGE_VERTEX_BIT),
+                frag = shader_factory.open(fs::file("/rs/shaders/box.frag.spv"), VK_SHADER_STAGE_FRAGMENT_BIT);
 
     vkw::Allocator allocator(device, true);
     vkw::Image<2> depth_buffer(allocator, vkw::MemoryUsage::DeviceLocal, VK_IMAGE_TYPE_2D, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, { device.swapchain().width(), device.swapchain().height(), 1 }, VK_FORMAT_D24_UNORM_S8_UINT, 1, 1, 1);
@@ -183,17 +291,15 @@ int main(int argc, char** argv)
     vkw::PipelineFactory pipeline_factory(device, shader_factory);
     vkw::PipelineLayout pipeline_layout = vkw::PipelineLayout::build()
                                               .with_descriptor_binding(1, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT)
-                                              .with_descriptor_binding(3, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
+                                              .with_descriptor_binding(3, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
                                               .with_push_constant_range(0, sizeof(glm::mat4), VK_SHADER_STAGE_VERTEX_BIT)
                                               .build(device);
 
     vkw::PipelineFactory::GraphicsPipelineSpecification pb({ vert, frag }, pipeline_layout);
     pb.set_vertex_input_binding(0, 12);
     pb.set_vertex_input_binding(1, 12);
-    pb.set_vertex_input_binding(2, 8);
     pb.set_vertex_input_attribute(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0);
     pb.set_vertex_input_attribute(1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0);
-    pb.set_vertex_input_attribute(2, 2, VK_FORMAT_R32G32_SFLOAT, 0);
     pb.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     pb.set_depth_clamp(false);
     pb.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -211,28 +317,40 @@ int main(int argc, char** argv)
     vkw::DescriptorSet descriptor_set_global = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(0)),
                        descriptor_set_perpass = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(1)),
                        descriptor_set_perobject = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(2)),
-                       descriptor_set_duckmaterial = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(3));
+                       descriptor_set_outerboxmtl = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(3)),
+                       descriptor_set_innerboxmtl = descriptor_pool.allocate(pipeline_layout.descriptor_set_layout(3));
 
-    DuckMesh duck(allocator);
-    DuckMaterial duck_material(allocator, texture_sampler, std::move(descriptor_set_duckmaterial));
+    OuterBoxMesh outer_box(allocator);
+    InnerBoxMesh inner_box(outer_box);
+    BoxMaterial outer_box_material(allocator, std::move(descriptor_set_outerboxmtl), { 0.8, 0.4, 0.8 }),
+        inner_box_material(allocator, std::move(descriptor_set_innerboxmtl), { 0.3, 0.5, 0.8 });
     vkw::HostBuffer<2> uniform_buffer(allocator, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 2 * sizeof(glm::mat4)); // probably this is gonna get split up
 
-    Scene main_scene;
-    scene::Rotation n1(main_scene.root());
-    scene::Geometry n2(&n1, duck, duck_material);
+    Scene box_scene;
+    scene::Geometry o_node(box_scene.root(), outer_box, outer_box_material);
+    scene::Translation t_node(box_scene.root());
+    scene::Rotation r_node(&t_node);
+    scene::Geometry i_node(&r_node, inner_box, inner_box_material);
+    LinearInterpolation<glm::vec3> t_anim({ 0, 1.25, 2.5, 3.70833 }, { { 0, 0, 0 }, { 0, 2.5, 0 }, { 0, 2.5, 0 }, { 0, 0, 0 } });
+    LinearInterpolation<glm::quat> r_anim({ 1.25, 2.5 }, { { 1, 0, 0, 0 }, { 0, 1, 0, 0 } });
+
     CoolVisitor visitor;
 
     auto& cmd = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
     cmd.begin(true);
-    duck.initialize_buffers(cmd);
-    duck_material.initialize_buffers(cmd);
+    outer_box.initialize_buffers(cmd);
+    inner_box.initialize_buffers(cmd);
+    outer_box_material.initialize_buffers(cmd);
+    inner_box_material.initialize_buffers(cmd);
     cmd.end();
     device.submit_commands()
         .add(cmd)
         .to_queue(vkw::QueueFamilyType::Graphics, 0);
     vkDeviceWaitIdle(device);
-    duck.cleanup_initialize_buffers();
-    duck_material.cleanup_initialize_buffers();
+    outer_box.cleanup_initialize_buffers();
+    inner_box.cleanup_initialize_buffers();
+    outer_box_material.cleanup_initialize_buffers();
+    inner_box_material.cleanup_initialize_buffers();
 
     while (glfwWindowShouldClose(window) == false) {
         glfwPollEvents();
@@ -242,18 +360,19 @@ int main(int argc, char** argv)
         device.acquire_next_image(image_available);
         command_pool.reset(false);
 
-        static auto start_time = std::chrono::high_resolution_clock::now();
-        auto now_time = std::chrono::high_resolution_clock::now();
-        float time = std::chrono::duration<float, std::chrono::seconds::period>(now_time - start_time).count();
-        n1.set_rotation(glm::angleAxis(glm::radians(90.f) * time, glm::vec3(0.f, 1.f, 0.f)));
-
         glm::mat4 mvp[2];
         mvp[0] = glm::perspective(glm::radians(45.f), device.swapchain().width() / static_cast<float>(device.swapchain().height()), 1.f, 1000.f);
-        mvp[1] = glm::lookAt(glm::vec3(0.f, 250.f, 400.f), glm::vec3(0.0f, 100.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        mvp[1] = glm::lookAt(glm::vec3(6.f, 4.f, 4.f), glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         mvp[0][1][1] *= -1;
         uniform_buffer.write_mapped(&mvp, 2 * sizeof(glm::mat4));
         descriptor_set_perpass.bind_buffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, uniform_buffer, 0, 2 * sizeof(glm::mat4));
         descriptor_set_perpass.update();
+
+        static auto start_time = std::chrono::high_resolution_clock::now();
+        auto now_time = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(now_time - start_time).count();
+        t_node.set_translation(t_anim.get(fmod(time, 5)));
+        r_node.set_rotation(r_anim.get(fmod(time, 5)));
 
         auto& cbuffer = command_pool.get(VK_COMMAND_BUFFER_LEVEL_PRIMARY, 0);
         cbuffer.begin();
@@ -263,7 +382,7 @@ int main(int argc, char** argv)
         cbuffer.bind_pipeline(pipeline);
         cbuffer.bind_descriptor_set(1, descriptor_set_perpass);
         visitor.set_command_info(cbuffer);
-        visitor.visit(main_scene);
+        visitor.visit(box_scene);
         vkCmdEndRenderPass(cbuffer);
         cbuffer.end();
 

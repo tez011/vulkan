@@ -3,7 +3,7 @@
 #include <glm/gtx/quaternion.hpp>
 #include <list>
 #include <stack>
-#include <vkw/Render.h>
+#include <vkw/render.h>
 
 namespace scene {
 
@@ -38,6 +38,7 @@ public:
         Group,
         Geometry,
         StaticTransform,
+        Translation,
         Rotation,
     };
 
@@ -113,6 +114,25 @@ public:
     void set_rotation(const glm::quat& new_rotation)
     {
         m_rotation = new_rotation;
+    }
+};
+
+class Translation : public Node {
+private:
+    glm::vec3 m_translation;
+
+public:
+    Translation(Node* parent, const glm::vec3& translation = { 0.f, 0.f, 0.f })
+        : Node(parent)
+        , m_translation(translation)
+    {
+    }
+    virtual Type type() const noexcept { return Type::Translation; }
+    virtual glm::mat4 transform() const;
+
+    void set_translation(const glm::vec3& new_translation)
+    {
+        m_translation = new_translation;
     }
 };
 

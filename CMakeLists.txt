@@ -93,9 +93,9 @@ add_executable(game
     "src/main.cpp"
     "src/vkw/Device.cpp"
     "src/vkw/Allocator.cpp"
-    "src/vkw/Render.cpp"
+    "src/vkw/render.cpp"
     "src/vkw/CommandBuffer.cpp"
-    "src/vkw/Vkresource.cpp"
+    "src/vkw/resource.cpp"
     "src/scene.cpp"
     "src/fs.cpp")
 add_dependencies(game shaders)

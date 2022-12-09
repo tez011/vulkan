@@ -143,6 +143,25 @@ void DescriptorPool::reset()
     m_current = m_pools.begin();
 }
 
+void DescriptorSet::bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<1>& buffer, VkDeviceSize offset, VkDeviceSize range)
+{
+    auto& buf = m_buffers.emplace_back();
+    buf.buffer = buffer;
+    buf.offset = offset;
+    buf.range = range;
+
+    for (auto& handle : m_handle) {
+        auto& write = m_writes.emplace_back();
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = handle;
+        write.dstBinding = binding;
+        write.dstArrayElement = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = type;
+        write.pBufferInfo = &buf;
+    }
+}
+
 void DescriptorSet::bind_buffer(uint32_t binding, VkDescriptorType type, const Buffer<2>& buffer, VkDeviceSize offset, VkDeviceSize range)
 {
     auto& buf = m_buffers.emplace_back();
@@ -173,10 +192,10 @@ void DescriptorSet::bind_image(uint32_t binding, VkDescriptorType type, const Im
     }
 #endif
 
-    for (int i = 0; i < 2; i++) {
+    for (auto& handle : m_handle) {
         auto& write = m_writes.emplace_back();
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = m_handle[i];
+        write.dstSet = handle;
         write.dstBinding = binding;
         write.dstArrayElement = 0;
         write.descriptorCount = 1;
